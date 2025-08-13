@@ -17,5 +17,7 @@ rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-configuration = { version = "0.1.0", path = "../configuration" }
-thiserror = "2.0.14"
+configuration = { path = "../configuration" }
+thiserror = "1.0"
+redis = { version = "0.25", features = ["tokio-comp"] }
+futures-util = "0.3"

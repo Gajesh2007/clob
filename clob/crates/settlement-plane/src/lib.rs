@@ -1,5 +1,5 @@
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use common_types::{StateSnapshot, Hash};
 use sha2::{Digest, Sha256};
 use reqwest::Client;
@@ -7,6 +7,7 @@ use serde::{Serialize, Deserialize};
 use serde_json;
 use configuration::Settings;
 use thiserror::Error;
+use futures_util::StreamExt;
 
 #[derive(Error, Debug)]
 pub enum SettlementPlaneError {
@@ -18,6 +19,8 @@ pub enum SettlementPlaneError {
     Bincode(#[from] bincode::Error),
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Redis error: {0}")]
+    Redis(#[from] redis::RedisError),
 }
 
 pub mod merkle;
@@ -38,7 +41,6 @@ async fn submit_batch_to_da(client: &Client, url: &str, batch: &[u8]) -> Result<
     if batch.is_empty() {
         return Ok(Vec::new());
     }
-    println!("Submitting batch of size {} bytes to EigenDA proxy...", batch.len());
     let response = client.post(url)
         .header("Content-Type", "application/octet-stream")
         .body(batch.to_vec())
@@ -46,7 +48,6 @@ async fn submit_batch_to_da(client: &Client, url: &str, batch: &[u8]) -> Result<
         .await?
         .error_for_status()?;
     let certificate = response.bytes().await?.to_vec();
-    println!("Batch successfully submitted. Received DA certificate of size {} bytes.", certificate.len());
     Ok(certificate)
 }
 
@@ -61,48 +62,61 @@ async fn submit_checkpoint_to_l1(file_path: &str, state_root: [u8; 32], da_certi
 }
 
 pub async fn run_settlement_plane(settings: Settings) -> Result<(), SettlementPlaneError> {
-    let mut log_file = File::open(&settings.verifier.execution_log_path).await?;
-    let mut log_buffer = Vec::new();
-    log_file.read_to_end(&mut log_buffer).await?;
-    let mut log_cursor = log_buffer.len();
-
     let http_client = Client::new();
+    let redis_client = redis::Client::open("redis://127.0.0.1/")?;
+    let mut pubsub = redis_client.get_async_connection().await?.into_pubsub();
+    pubsub.psubscribe("market:*").await?;
+    pubsub.subscribe("deposits").await?;
+    let mut message_stream = pubsub.on_message();
+    let mut transaction_batch = Vec::new();
+
     let mut checkpoint_timer = tokio::time::interval(tokio::time::Duration::from_secs(settings.settlement_plane.checkpoint_interval_seconds));
 
     loop {
-        checkpoint_timer.tick().await;
-        log_file.read_to_end(&mut log_buffer).await?;
-        let new_log_bytes = &log_buffer[log_cursor..];
-        
-        match submit_batch_to_da(&http_client, &settings.settlement_plane.eigenda_proxy_url, new_log_bytes).await {
-            Ok(da_certificate) => {
-                let snapshot = fetch_state_snapshot(&http_client, &settings.settlement_plane.state_snapshot_url).await?;
-                let mut leaves: Vec<Hash> = Vec::new();
-                for (_user_id, account) in &snapshot.accounts {
-                    let mut hasher = Sha256::new();
-                    hasher.update(&bincode::serialize(account)?);
-                    leaves.push(hasher.finalize().into());
-                }
-                for (_price, price_level) in &snapshot.order_book.bids {
-                    for order in price_level {
-                        let mut hasher = Sha256::new();
-                        hasher.update(&bincode::serialize(order)?);
-                        leaves.push(hasher.finalize().into());
-                    }
-                }
-                for (_price, price_level) in &snapshot.order_book.asks {
-                    for order in price_level {
-                        let mut hasher = Sha256::new();
-                        hasher.update(&bincode::serialize(order)?);
-                        leaves.push(hasher.finalize().into());
-                    }
-                }
-                let merkle_tree = MerkleTree::new(&leaves);
-                let state_root = merkle_tree.root();
-                submit_checkpoint_to_l1(&settings.settlement_plane.checkpoint_file_path, state_root, &da_certificate).await?;
-                log_cursor = log_buffer.len();
+        tokio::select! {
+            Some(msg) = message_stream.next() => {
+                let payload: Vec<u8> = msg.get_payload()?;
+                transaction_batch.extend_from_slice(&payload);
             }
-            Err(e) => eprintln!("Failed to process checkpoint: {}. Will retry on next cycle.", e),
+            _ = checkpoint_timer.tick() => {
+                if transaction_batch.is_empty() {
+                    continue;
+                }
+                let batch_to_submit = std::mem::take(&mut transaction_batch);
+
+                match submit_batch_to_da(&http_client, &settings.settlement_plane.eigenda_proxy_url, &batch_to_submit).await {
+                    Ok(da_certificate) => {
+                        let snapshot = fetch_state_snapshot(&http_client, &settings.settlement_plane.state_snapshot_url).await?;
+                        let mut leaves: Vec<Hash> = Vec::new();
+                        for (_user_id, account) in &snapshot.accounts {
+                            let mut hasher = Sha256::new();
+                            hasher.update(&bincode::serialize(account)?);
+                            leaves.push(hasher.finalize().into());
+                        }
+                        for (_price, price_level) in &snapshot.order_book.bids {
+                            for order in price_level {
+                                let mut hasher = Sha256::new();
+                                hasher.update(&bincode::serialize(order)?);
+                                leaves.push(hasher.finalize().into());
+                            }
+                        }
+                        for (_price, price_level) in &snapshot.order_book.asks {
+                            for order in price_level {
+                                let mut hasher = Sha256::new();
+                                hasher.update(&bincode::serialize(order)?);
+                                leaves.push(hasher.finalize().into());
+                            }
+                        }
+                        let merkle_tree = MerkleTree::new(&leaves);
+                        let state_root = merkle_tree.root();
+                        submit_checkpoint_to_l1(&settings.settlement_plane.checkpoint_file_path, state_root, &da_certificate).await?;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to process checkpoint: {}. Re-queuing batch.", e);
+                        transaction_batch = batch_to_submit;
+                    }
+                }
+            }
         }
     }
 }

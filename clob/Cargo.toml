@@ -3,9 +3,12 @@ resolver = "2"
 members = [
     "crates/common-types",
     "crates/matching-engine",
-    "crates/execution-plane",
     "crates/settlement-plane",
-    "crates/verifier", "crates/benchmark-client", "crates/configuration",
+    "crates/verifier",
+    "crates/ingress-verifier",
+    "crates/market-matcher",
+    "crates/configuration",
+    "crates/benchmark-client",
 ]
 
 [workspace.dependencies]

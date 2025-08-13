@@ -19,11 +19,14 @@ hex = "0.4"
 rust_decimal = "1.35"
 serde = { version = "1.0", features = ["derive"] }
 rust_decimal_macros = "1.35"
-configuration = { version = "0.1.0", path = "../configuration" }
-thiserror = "2.0.14"
+configuration = { path = "../configuration" }
+thiserror = "1.0"
+redis = { version = "0.25", features = ["tokio-comp"] }
 
 [dev-dependencies]
-execution-plane = { path = "../execution-plane" }
+ingress-verifier = { path = "../ingress-verifier" }
+market-matcher = { path = "../market-matcher" }
 settlement-plane = { path = "../settlement-plane" }
 ed25519-dalek = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
+redis-test = "0.2"

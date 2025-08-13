@@ -10,6 +10,7 @@ use common_types::{
 use matching_engine::MatchingEngine;
 use configuration::Settings;
 use thiserror::Error;
+use redis::AsyncCommands;
 
 #[derive(Error, Debug)]
 pub enum VerifierError {
@@ -21,6 +22,8 @@ pub enum VerifierError {
     Json(#[from] serde_json::Error),
     #[error("Verifier encountered a transaction for an unknown user: {0}")]
     UnknownUser(UserID),
+    #[error("Redis error: {0}")]
+    Redis(#[from] redis::RedisError),
 }
 
 pub mod merkle;
@@ -37,18 +40,18 @@ pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
     checkpoint_file.read_to_end(&mut checkpoint_bytes).await?;
     let official_checkpoint: L1Checkpoint = serde_json::from_slice(&checkpoint_bytes)?;
 
-    let mut log_file = File::open(&settings.verifier.execution_log_path).await?;
-    let mut log_buffer = Vec::new();
-    log_file.read_to_end(&mut log_buffer).await?;
+    // The verifier now needs to fetch the log from the DA layer.
+    // For this simulation, we assume the DA layer is Redis itself,
+    // and we can read the log by fetching all messages from a list.
+    let redis_client = redis::Client::open("redis://127.0.0.1/")?;
+    let mut redis_conn = redis_client.get_async_connection().await?;
+    let log_entries: Vec<Vec<u8>> = redis_conn.lrange("execution_log", 0, -1).await?;
 
     let mut local_order_book = OrderBook::new();
     let local_account_cache: DashMap<UserID, Account> = DashMap::new();
     
-    let mut reader = std::io::Cursor::new(&log_buffer);
-    while reader.position() < log_buffer.len() as u64 {
-        let tx_len = bincode::deserialize_from::<_, u32>(&mut reader)? as usize;
-        let tx: Transaction = bincode::deserialize_from(&mut reader)?;
-
+    for entry in log_entries {
+        let tx: Transaction = bincode::deserialize(&entry)?;
         match tx {
             Transaction::Deposit(deposit) => {
                 local_account_cache.entry(deposit.user_id).or_insert_with(|| Account {
