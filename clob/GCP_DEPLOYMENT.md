@@ -1,85 +1,96 @@
-# GCP Production Deployment Guide (Multi-Service Architecture)
+# GCP Production Deployment Guide (1M TPS Architecture)
 
-This document provides a high-level strategy for deploying the high-performance CLOB system on Google Cloud Platform (GCP). This guide reflects the final, distributed architecture composed of specialized services.
+This document provides the definitive strategy for deploying the CLOB system on Google Cloud Platform to achieve a target of **1 million transactions per second** across **21,000 markets**.
 
-## Architecture Overview
+This guide reflects the final, distributed, multi-service architecture.
 
-The system is deployed as a set of independent, scalable microservices that communicate via a high-performance message bus (Redis). This aligns with the `PRODUCT.md`'s description of a physically distributed pipeline.
+## Architecture for 1M TPS
 
-*   **Ingress & Verification:** A fleet of servers whose only job is to handle client connections and verify signatures.
-*   **Message Bus:** A managed Redis instance acts as the ultra-low-latency message bus for passing validated transactions. It also serves as the durable `execution_log`.
-*   **Market Matching:** A sharded fleet of servers, where each server (or group of cores) is responsible for a specific set of markets.
-*   **Settlement:** A reliable background service that consumes the log and state to produce checkpoints.
+To achieve this level of performance, we must deploy our specialized services (`ingress-verifier`, `market-matcher`) as large, parallel fleets on hardware optimized for each task. The core principle is to eliminate shared resources and contention wherever possible.
 
 ### GCP Services Mapping
 
-| Service | GCP Production Equivalent | Purpose |
+| Service | GCP Production Equivalent | Purpose & Rationale |
 | :--- | :--- | :--- |
-| `ingress-verifier` | **Compute Engine C3D Fleet** | High-throughput TCP termination & signature verification. |
-| `market-matcher` | **Compute Engine C3 Fleet** | Ultra-low-latency, single-threaded matching per market. |
-| `settlement-plane` | **Compute Engine E2 Cluster** | Reliable, asynchronous state checkpointing. |
-| Message Bus / Log | **Memorystore for Redis** | High-performance Pub/Sub and durable transaction log. |
-| Load Balancer | **Regional Internal TCP Load Balancer** | Managed, high-performance network load balancing. |
+| **Load Balancer** | **Regional Internal TCP Load Balancer** | Managed, high-performance network load balancing. The single entry point for all traders. |
+| `ingress-verifier` | **Fleet of Compute Engine C3D** | Brute-force signature verification. C3D instances provide the maximum number of cores for parallel processing. |
+| **Message Bus** | **Self-Hosted Redis on a dedicated C3D** | **Lowest Latency.** A managed service is too slow. A dedicated instance in a compact placement policy provides microsecond-level latency for the message bus and execution log. |
+| `market-matcher` | **Fleet of Compute Engine C3** | Ultra-low-latency, single-threaded matching. C3 instances provide the highest single-core clock speeds. |
+| `settlement-plane` | **Compute Engine E2 Cluster** | Reliable, asynchronous state checkpointing. Does not need high-performance hardware. |
 
 ---
 
-## Infrastructure & Deployment Plan
+## Deployment Plan & Instructions
 
-### 1. Network Setup
+### 1. Network & Placement
 
 1.  **Create a VPC:** Provision a dedicated **VPC (Virtual Private Cloud)**.
-2.  **Firewall Rules:** Create firewall rules to:
-    *   Allow TCP traffic on port `8080` (for `ingress-verifier`) from trusted client IP ranges.
-    *   Allow TCP traffic on port `9090` (for the `ingress-verifier` HTTP API) from trusted admin ranges.
-    *   Allow all internal traffic within the VPC so the services can communicate with each other and with Redis.
+2.  **Create a Compact Placement Policy:** In the target region, create a compact placement policy. **All C3 and C3D instances for this system must be launched within this policy.** This is critical for ensuring minimal network latency between services.
+3.  **Firewall Rules:** Create firewall rules to:
+    *   Allow TCP traffic on port `8080` from your trader/benchmark client IP ranges.
+    *   Allow TCP traffic on port `9090` from your admin IP ranges.
+    *   Allow all internal TCP and UDP traffic within the VPC.
 
-### 2. Provision Managed Services
+### 2. Provision the Message Bus
 
-1.  **Create a Memorystore for Redis Instance:**
-    *   Choose a sufficiently large instance to handle the message volume and store the entire execution log in memory.
-    *   Place it in the same region as your Compute Engine instances.
+1.  **Create a Dedicated Redis Instance:**
+    *   Launch a single **`c3d-standard-30`** (or larger) instance within your compact placement policy.
+    *   Install and configure a high-performance Redis server on this instance. This will be your message bus.
+    *   Note its internal IP address.
 
-### 3. Provision Compute Fleets
-
-Create three distinct **Managed Instance Groups (MIGs)** using Instance Templates. All instances should be in the same region and zone, and ideally within a **Compact Placement Policy** to minimize network latency.
+### 3. Provision the Compute Fleets
 
 **A. Ingress Verifier Fleet:**
 
-*   **Instance Template:**
-    *   **Machine Type:** `c3d-standard-180` (CPU-heavy for signature verification).
+1.  **Create an Instance Template:**
+    *   **Machine Type:** `c3d-standard-180`.
     *   **Container Image:** The Docker image for the `ingress-verifier` binary.
-*   **Managed Instance Group:**
-    *   Create a MIG from this template. Start with 2-3 instances and configure autoscaling based on CPU utilization.
-*   **Load Balancer:**
-    *   Create a **Regional Internal TCP Load Balancer** and set this MIG as its backend. This provides a single, stable IP address for traders.
+    *   **Environment Variable:** Set `REDIS_ADDR` to the internal IP of your Redis instance (e.g., `redis://10.0.0.5/`).
+2.  **Create a Managed Instance Group (MIG):**
+    *   Create a MIG from this template with **5-10 instances**.
+    *   Configure the **Regional Internal TCP Load Balancer** to use this MIG as its backend for port `8080`.
 
 **B. Market Matcher Fleet:**
 
-*   **Instance Template:**
-    *   **Machine Type:** `c3-highcpu-8` (High clock speed for single-threaded performance).
+1.  **Create an Instance Template:**
+    *   **Machine Type:** `c3-highcpu-8` (8 vCPUs, 16 GB RAM).
     *   **Container Image:** The Docker image for the `market-matcher` binary.
-*   **Managed Instance Group:**
-    *   Create a MIG from this template. The number of instances will depend on how you want to shard your 21,000 markets. You could start with 10 instances, assigning ~2100 markets to each.
-    *   **Startup Script:** The script for this instance will need to know which markets it is responsible for. This can be passed via instance metadata. The script would then launch the `market-matcher` binary with the correct market IDs as command-line arguments (e.g., `./market-matcher 1 2 3 ... 2100`).
+    *   **Environment Variable:** Set `REDIS_ADDR` to the internal IP of your Redis instance.
+2.  **Create a Managed Instance Group (MIG):**
+    *   Create a MIG from this template with **10-15 instances**.
+    *   **Startup Script:** This is the key to sharding. The startup script on each instance must determine which markets it is responsible for and launch the `market-matcher` processes accordingly, using `taskset` to pin each process to a specific core.
+    *   *Example Startup Script Logic:*
+        ```bash
+        #!/bin/bash
+        # This is a simplified example. A real script would get its shard
+        # assignment from instance metadata.
+        
+        # On machine #1:
+        taskset -c 1 ./market-matcher 1 2 3 ... 2100 &
+        taskset -c 2 ./market-matcher 2101 2102 ... 4200 &
+        # ... and so on for all cores.
+        ```
 
 **C. Settlement Plane Cluster:**
 
-*   **Instance Template:**
-    *   **Machine Type:** `e2-standard-4` (Cost-effective for this less-demanding workload).
-    *   **Container Image:** The Docker image for the `settlement-plane` binary.
-*   **Managed Instance Group:**
-    *   Create a MIG from this template with a fixed size of 2 for high availability.
+*   Deploy the `settlement-plane` binary to a small cluster (2 instances) of `e2-standard-4` machines. They do not need to be in the compact placement policy.
 
-### 4. Configuration
+### 4. Benchmarking the Deployed System
 
-*   Use a **startup script** in your instance templates to pull the latest `config.toml` from a central **GCS Bucket**.
-*   The Redis connection string should be passed to the applications via an **environment variable** (`REDIS_ADDR`). This makes it easy to change without rebuilding the container.
+Once all services are running, you can measure the true end-to-end performance.
 
-### 5. Running the System
+1.  **Provision a Benchmark Client Instance:**
+    *   Launch a **`c3d-standard-8`** instance in the **same compact placement policy**.
+    *   SSH into the instance and clone the project.
+    *   Build the `benchmark-client`: `cargo build --release --bin benchmark-client`.
 
-Once deployed, the system will be fully operational.
-*   Traders connect to the TCP Load Balancer's IP address.
-*   The `ingress-verifier` fleet handles the connections and publishes to Redis.
-*   The `market-matcher` fleet subscribes to the Redis channels and processes trades.
-*   The `settlement-plane` runs in the background, providing verifiability.
-*   Independent **Verifiers** can be run from anywhere, connecting to your Redis instance (if you allow public access) or, more realistically, reading the execution log after it has been exported from Redis to a public data store.
+2.  **Run the Test:**
+    *   **Create a User:** From the benchmark instance, call the HTTP API of the `ingress-verifier`'s load balancer to create a user and get a private key.
+        ```bash
+        curl -X POST http://<LOAD_BALANCER_IP>:9090/users
+        ```
+    *   **Run the Client:** Execute the benchmark client, passing it the private key.
+        ```bash
+        ./target/release/benchmark-client <PASTE_PRIVATE_KEY_HERE>
+        ```
+    *   The client will connect to the load balancer, send a transaction, and print the **true, end-to-end latency** of your production-grade system.
