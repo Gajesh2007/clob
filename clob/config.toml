@@ -1,0 +1,19 @@
+# This is an optional configuration file.
+# Values here will override the defaults set in the code.
+
+[execution_plane]
+# tcp_listen_addr = "127.0.0.1:8080"
+# http_listen_addr = "127.0.0.1:9090"
+# execution_log_path = "execution.log"
+
+[settlement_plane]
+# checkpoint_interval_seconds = 5
+# state_snapshot_url = "http://127.0.0.1:9090/state"
+# checkpoint_file_path = "checkpoint.json"
+
+[verifier]
+# checkpoint_file_path = "checkpoint.json"
+# execution_log_path = "execution.log"
+
+[multicast]
+# addr = "239.0.0.1:9000"

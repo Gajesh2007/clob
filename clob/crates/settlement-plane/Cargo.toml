@@ -3,6 +3,10 @@ name = "settlement-plane"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "settlement-plane"
+path = "src/main.rs"
+
 [dependencies]
 common-types = { path = "../common-types" }
 tokio = { version = "1", features = ["full"] }
@@ -13,3 +17,5 @@ rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+configuration = { version = "0.1.0", path = "../configuration" }
+thiserror = "2.0.14"

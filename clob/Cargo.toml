@@ -5,7 +5,7 @@ members = [
     "crates/matching-engine",
     "crates/execution-plane",
     "crates/settlement-plane",
-    "crates/verifier", "crates/benchmark-client",
+    "crates/verifier", "crates/benchmark-client", "crates/configuration",
 ]
 
 [workspace.dependencies]

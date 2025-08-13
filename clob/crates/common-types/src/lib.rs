@@ -1,6 +1,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 
 // --- Financial Primitives ---
 pub type Price = Decimal;
@@ -12,6 +13,12 @@ pub struct OrderID(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct UserID(pub u64);
+
+impl fmt::Display for UserID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct TradeID(pub u64);
@@ -30,7 +37,6 @@ pub type Hash = [u8; 32];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicKey(pub ed25519::VerifyingKey);
 
-// Signatures can be compared but not hashed, which is why `Hash` is not derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature(pub ed25519::Signature);
 
@@ -53,7 +59,6 @@ pub struct Account {
     pub balances: BTreeMap<AssetID, Quantity>,
 }
 
-/// The fundamental order structure, containing all necessary details for matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Order {
     pub order_id: OrderID,
@@ -63,18 +68,28 @@ pub struct Order {
     pub price: Price,
     pub quantity: Quantity,
     pub order_type: OrderType,
-    pub timestamp: u64, // Nanoseconds since epoch
+    pub timestamp: u64,
 }
 
-/// A wrapper for an Order and its associated signature.
-/// This struct cannot be hashed because the underlying signature type cannot be hashed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedOrder {
     pub order: Order,
     pub signature: Signature,
 }
 
-/// Represents a completed trade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deposit {
+    pub user_id: UserID,
+    pub asset_id: AssetID,
+    pub amount: Quantity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Transaction {
+    SignedOrder(SignedOrder),
+    Deposit(Deposit),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Trade {
     pub trade_id: TradeID,
@@ -88,7 +103,6 @@ pub struct Trade {
     pub timestamp: u64,
 }
 
-/// Public events broadcast by the matching engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MarketEvent {
     OrderPlaced {
