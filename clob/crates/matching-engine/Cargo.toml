@@ -1,0 +1,17 @@
+[package]
+name = "matching-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common-types = { path = "../common-types" }
+rust_decimal = "1.35"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+rust_decimal_macros = "1.35"
+criterion = "0.5"
+
+[[bench]]
+name = "orderbook_bench"
+harness = false

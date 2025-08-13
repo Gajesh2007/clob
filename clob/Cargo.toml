@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common-types",
+    "crates/matching-engine",
+    "crates/execution-plane",
+    "crates/settlement-plane",
+    "crates/verifier", "crates/benchmark-client",
+]
+
+[workspace.dependencies]
+ed25519-dalek = { version = "2.1", features = ["serde"] }
