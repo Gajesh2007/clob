@@ -53,12 +53,12 @@ async fn run_single_market(
     while let Some(msg) = stream.next().await {
         if let Ok(Transaction::SignedOrder(signed_order)) = bincode::deserialize(msg.get_payload_bytes()) {
             let order = signed_order.order;
-            tracing::info!(user_id = %order.user_id, order_id = order.order_id.0, "Received order");
+            tracing::info!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, "Received order from Redis");
 
             let user_account = match account_cache.get(&order.user_id) {
                 Some(acc) => acc,
                 None => {
-                    tracing::warn!(user_id = %order.user_id, "Order rejected: User account not found.");
+                    tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, "Order rejected: User account not found in cache.");
                     continue;
                 }
             };
@@ -68,9 +68,10 @@ async fn run_single_market(
             
             let balance = user_account.balances.get(&required_asset).copied().unwrap_or_default();
             if balance < required_amount {
-                tracing::warn!(user_id = %order.user_id, "Insufficient funds for order");
+                tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, asset_id = required_asset.0, required_amount = %required_amount, balance = %balance, "Order rejected: Insufficient funds");
                 continue;
             }
+            tracing::info!(order_id = %order.order_id.0, user_id = %order.user_id, "Sufficient funds found, processing order.");
 
             let events = order_book.process_order(order);
             for event in &events {

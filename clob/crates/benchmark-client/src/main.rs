@@ -1,5 +1,4 @@
 use std::error::Error;
-// UDP multicast imports removed; using Redis PubSub for cross-VM counting
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -19,6 +18,9 @@ use rand::SeedableRng;
 use redis::AsyncCommands;
 use clap::Parser;
 use tracing::{info, error};
+use dashmap::DashMap;
+use hdrhistogram::Histogram;
+use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -74,7 +76,6 @@ async fn create_and_fund_user(
 
 async fn send_order(stream: &mut TcpStream, signed_order: &SignedOrder) -> Result<(), Box<dyn Error + Send + Sync>> {
     let payload = bincode::serialize(signed_order)?;
-    // Use length-prefix framing to send multiple orders on one connection
     let len = payload.len() as u32;
     stream.write_u32(len).await?;
     stream.write_all(&payload).await?;
@@ -91,17 +92,14 @@ struct Trader {
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-
     let http_client = reqwest::Client::new();
 
-    // 0. Clear the execution log from previous runs for a clean state.
     info!("--- Clearing previous state ---");
     let redis_client = redis::Client::open(args.redis_addr.as_str())?;
     let mut redis_conn = redis_client.get_async_connection().await?;
     let _: () = redis_conn.del("execution_log").await?;
     info!("State cleared.");
 
-    // 1. Create and fund a pool of traders.
     info!("--- Setting up benchmark traders ---");
     let mut traders = Vec::new();
     for i in 0..args.num_traders {
@@ -116,41 +114,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("--- Allowing 2s for deposits to be processed ---");
     time::sleep(Duration::from_secs(2)).await;
 
-    // 2. Set up counters and run duration.
     let trade_count = Arc::new(AtomicU64::new(0));
+    let orders_sent_count = Arc::new(AtomicU64::new(0));
     let test_duration = Duration::from_secs(args.duration_secs);
     let tcp_addr = Arc::new(args.tcp_addr);
     let market_id = args.market_id;
 
-    // 3. Listen for trades on Redis Pub/Sub in a separate task to count them.
+    let pending_orders = Arc::new(DashMap::<OrderID, Instant>::new());
+    let latency_histogram = Arc::new(Mutex::new(Histogram::<u64>::new(2).unwrap()));
+
     let trade_count_clone = trade_count.clone();
+    let pending_orders_clone = pending_orders.clone();
+    let latency_hist_clone = latency_histogram.clone();
     let events_channel = format!("market-events:{}", market_id);
     let mut pubsub_conn = redis_client.get_async_connection().await?.into_pubsub();
     pubsub_conn.subscribe(events_channel).await?;
     
     tokio::spawn(async move {
         let mut message_stream = pubsub_conn.on_message();
-        info!("Trade counter started on Redis.");
+        info!("Trade counter and latency recorder started on Redis.");
         while let Ok(Some(msg)) = time::timeout(test_duration + Duration::from_secs(5), message_stream.next()).await {
             let payload: Vec<u8> = msg.get_payload().unwrap();
-            if let Ok(MarketEvent::OrderTraded(_)) = bincode::deserialize(&payload) {
+            if let Ok(MarketEvent::OrderTraded(trade)) = bincode::deserialize(&payload) {
                 trade_count_clone.fetch_add(1, Ordering::SeqCst);
+                if let Some((_, start_time)) = pending_orders_clone.remove(&trade.maker_order_id) {
+                    let latency = start_time.elapsed().as_micros() as u64;
+                    latency_hist_clone.lock().await.record(latency).unwrap();
+                }
+                if let Some((_, start_time)) = pending_orders_clone.remove(&trade.taker_order_id) {
+                    let latency = start_time.elapsed().as_micros() as u64;
+                    latency_hist_clone.lock().await.record(latency).unwrap();
+                }
             }
         }
         info!("Trade counter finished.");
     });
 
-    // 4. Start sending orders from all traders concurrently.
     info!("--- Starting benchmark for {} seconds ---", args.duration_secs);
     let start_time = Instant::now();
     let mut handles = Vec::new();
 
     for trader in traders {
         let tcp_addr_clone = tcp_addr.clone();
+        let pending_orders_clone = pending_orders.clone();
+        let orders_sent_clone = orders_sent_count.clone();
         let handle = tokio::spawn(async move {
             let mut rng = StdRng::from_entropy();
-            
-            // Each trader gets one persistent connection
             let mut stream = match TcpStream::connect(tcp_addr_clone.as_str()).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -163,20 +172,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let order = Order {
                     order_id: OrderID(rng.gen()),
                     user_id: trader.user_id,
-        market_id: MarketID(market_id),
+                    market_id: MarketID(market_id),
                     side: trader.side,
                     price: dec!(100.0) + Decimal::from(rng.gen_range(-5..=5)),
-        quantity: dec!(1.0),
-        order_type: OrderType::Limit,
-        timestamp: 0,
-    };
+                    quantity: dec!(1.0),
+                    order_type: OrderType::Limit,
+                    timestamp: 0,
+                };
                 let message_bytes = bincode::serialize(&order).unwrap();
                 let signature = trader.signing_key.sign(&message_bytes);
                 let signed_order = SignedOrder { order, signature: Signature(signature) };
 
+                pending_orders_clone.insert(order.order_id, Instant::now());
+                orders_sent_clone.fetch_add(1, Ordering::SeqCst);
+                
                 if let Err(e) = send_order(&mut stream, &signed_order).await {
                     error!("Failed to send order: {}. Closing connection.", e);
-                    break; // Exit the loop if the connection breaks
+                    pending_orders_clone.remove(&order.order_id);
+                    orders_sent_clone.fetch_sub(1, Ordering::SeqCst);
+                    break;
                 }
             }
         });
@@ -189,20 +203,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("--- Benchmark finished sending orders ---");
     
-    // 6. Wait a moment for final trades to be processed.
     time::sleep(Duration::from_secs(3)).await;
 
-    // 7. Calculate and print results.
     let total_trades = trade_count.load(Ordering::SeqCst);
+    let total_orders_sent = orders_sent_count.load(Ordering::SeqCst);
     let elapsed_secs = start_time.elapsed().as_secs_f64();
     let tps = total_trades as f64 / elapsed_secs;
+    let success_rate = if total_orders_sent > 0 { (total_trades * 2) as f64 / total_orders_sent as f64 * 100.0 } else { 0.0 };
 
-    println!("\n===========================");
-    println!("BENCHMARK RESULTS:");
-    println!("Test Duration:  {:.2} seconds", elapsed_secs);
-    println!("Total Trades:   {}", total_trades);
-    println!("Throughput:     {:.2} TPS", tps);
-    println!("===========================");
+    let hist = latency_histogram.lock().await;
+    println!("\n========================================");
+    println!("           BENCHMARK RESULTS");
+    println!("----------------------------------------");
+    println!("Test Duration:      {:.2} seconds", elapsed_secs);
+    println!("Throughput:         {:.2} TPS", tps);
+    println!("----------------------------------------");
+    println!("Order Execution:");
+    println!("Total Orders Sent:  {}", total_orders_sent);
+    println!("Total Trades:       {}", total_trades);
+    println!("Success Rate:       {:.2}%", success_rate);
+    println!("----------------------------------------");
+    println!("Latency (microseconds):");
+    println!("Mean:               {:.2}", hist.mean());
+    println!("Min:                {}", hist.min());
+    println!("Max:                {}", hist.max());
+    println!("p50 (Median):       {}", hist.value_at_percentile(50.0));
+    println!("p90:                {}", hist.value_at_percentile(90.0));
+    println!("p99:                {}", hist.value_at_percentile(99.0));
+    println!("p99.9:              {}", hist.value_at_percentile(99.9));
+    println!("========================================");
     
     Ok(())
 }

@@ -51,17 +51,23 @@ async fn handle_connection(
 
         let signed_order: SignedOrder = bincode::deserialize(&buffer)?;
         let order = signed_order.order;
+        info!(order_id = %order.order_id.0, user_id = %order.user_id, "Received order");
 
         let public_key = public_key_cache.get(&order.user_id).ok_or(IngressError::PublicKeyNotFound(order.user_id))?;
         let message_bytes = bincode::serialize(&order)?;
-        public_key.verify(&message_bytes, &signed_order.signature.0)?;
+        
+        public_key.verify(&message_bytes, &signed_order.signature.0).map_err(|e| {
+            tracing::warn!(order_id = %order.order_id.0, "Signature verification failed");
+            e
+        })?;
         
         let channel = format!("market:{}", order.market_id.0);
         let tx = Transaction::SignedOrder(signed_order);
         let payload = bincode::serialize(&tx)?;
         
+        info!(order_id = %order.order_id.0, channel = %channel, "Publishing order to Redis");
         redis::pipe()
-            .publish(channel, payload.clone())
+            .publish(&channel, payload.clone())
             .rpush("execution_log", payload)
             .query_async(&mut redis_conn)
             .await?;
