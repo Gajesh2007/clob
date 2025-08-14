@@ -1,10 +1,11 @@
 use std::error::Error;
-use std::net::{Ipv4Addr, SocketAddr};
+// UDP multicast imports removed; using Redis PubSub for cross-VM counting
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::time::{self, Instant, Duration};
 use tokio::io::AsyncWriteExt;
+use futures_util::stream::StreamExt;
 use common_types::{
     Order, SignedOrder, Side, OrderType, OrderID, UserID, MarketID, Signature, AssetID, MarketEvent
 };
@@ -64,7 +65,7 @@ async fn create_and_fund_user(
     for (asset_id, amount) in assets {
         let deposit_url = format!("http://{}/deposit", http_addr);
         let deposit_req = DepositRequest { user_id, asset_id: AssetID(*asset_id), amount: *amount };
-        http_client.post(&deposit_url).json(&deposit_req).send().await?.error_for_status()?;
+    http_client.post(&deposit_url).json(&deposit_req).send().await?.error_for_status()?;
         info!(user_id = %user_id, "Funded user with {} of asset {}", amount, asset_id);
     }
     
@@ -130,7 +131,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         let mut message_stream = pubsub_conn.on_message();
         info!("Trade counter started on Redis.");
-        while let Ok(Ok(msg)) = time::timeout(test_duration + Duration::from_secs(5), message_stream.next()).await {
+        while let Ok(Some(msg)) = time::timeout(test_duration + Duration::from_secs(5), message_stream.next()).await {
             let payload: Vec<u8> = msg.get_payload().unwrap();
             if let Ok(MarketEvent::OrderTraded(_)) = bincode::deserialize(&payload) {
                 trade_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -162,13 +163,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let order = Order {
                     order_id: OrderID(rng.gen()),
                     user_id: trader.user_id,
-                    market_id: MarketID(market_id),
+        market_id: MarketID(market_id),
                     side: trader.side,
                     price: dec!(100.0) + Decimal::from(rng.gen_range(-5..=5)),
-                    quantity: dec!(1.0),
-                    order_type: OrderType::Limit,
-                    timestamp: 0,
-                };
+        quantity: dec!(1.0),
+        order_type: OrderType::Limit,
+        timestamp: 0,
+    };
                 let message_bytes = bincode::serialize(&order).unwrap();
                 let signature = trader.signing_key.sign(&message_bytes);
                 let signed_order = SignedOrder { order, signature: Signature(signature) };
@@ -202,6 +203,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Total Trades:   {}", total_trades);
     println!("Throughput:     {:.2} TPS", tps);
     println!("===========================");
-
+    
     Ok(())
 }

@@ -8,6 +8,7 @@ use thiserror::Error;
 use dashmap::DashMap;
 use std::collections::BTreeMap;
 use futures_util::StreamExt;
+use redis::AsyncCommands;
 use tracing::{self, Level};
 use tracing_subscriber::FmtSubscriber;
 

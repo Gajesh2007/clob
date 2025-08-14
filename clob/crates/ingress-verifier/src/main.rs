@@ -77,7 +77,7 @@ struct DepositRequest { user_id: UserID, asset_id: AssetID, amount: Decimal }
 
 async fn run_http_server(
     public_key_cache: PublicKeyCache,
-    mut redis_conn: redis::aio::MultiplexedConnection,
+    redis_conn: redis::aio::MultiplexedConnection,
     addr: std::net::SocketAddr,
 ) {
     let create_user_route = warp::post()
