@@ -16,8 +16,15 @@ apt-get install -y curl build-essential pkg-config libssl-dev git
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 source /root/.cargo/env
 
-# 3. Clone and Build Project
-git clone "$REPO_URL" /opt/nasdaq
+# 3. Clone or Update Project
+if [ -d "/opt/nasdaq/.git" ]; then
+    echo "Repository exists, pulling latest changes..."
+    cd /opt/nasdaq
+    git pull
+else
+    echo "Cloning repository..."
+    git clone "$REPO_URL" /opt/nasdaq
+fi
 cd /opt/nasdaq/clob
 
 # Create config.toml
@@ -56,6 +63,9 @@ WorkingDirectory=/opt/nasdaq/clob
 ExecStart=/opt/nasdaq/clob/target/release/ingress-verifier
 Restart=on-failure
 RestartSec=5
+# Increase OS limits for high-throughput networking
+LimitNOFILE=1048576
+LimitNPROC=infinity
 
 [Install]
 WantedBy=multi-user.target
