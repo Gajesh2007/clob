@@ -20,6 +20,7 @@ set -euo pipefail
 #  -d  Duration seconds (uint), default: 30
 #  -l  RUST_LOG level (info|debug|warn), default: info
 
+REPO_URL=${REPO_URL:-"https://github.com/Gajesh2007/clob.git"}
 HTTP_ADDR="127.0.0.1:9090"
 TCP_ADDR="127.0.0.1:8080"
 REDIS_ADDR="redis://127.0.0.1/"
@@ -41,24 +42,36 @@ while getopts ":H:T:R:m:t:d:l:" opt; do
   esac
 done
 
-# Locate repo root from this script's directory
+# Resolve repo root: prefer this script's repo; fall back to /opt/nasdaq/clob; else clone
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR%/scripts}"
+CANDIDATE_ROOT="${SCRIPT_DIR%/scripts}"
+if [[ -f "$CANDIDATE_ROOT/Cargo.toml" ]]; then
+  REPO_ROOT="$CANDIDATE_ROOT"
+elif [[ -f "/opt/nasdaq/clob/Cargo.toml" ]]; then
+  REPO_ROOT="/opt/nasdaq/clob"
+else
+  sudo mkdir -p /opt/nasdaq
+  sudo chown -R "$USER":"$USER" /opt/nasdaq || true
+  git clone "$REPO_URL" /opt/nasdaq/clob
+  REPO_ROOT="/opt/nasdaq/clob"
+fi
 cd "$REPO_ROOT"
+
+# Ensure Rust toolchain
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "Installing Rust toolchain..."
+  curl https://sh.rustup.rs -sSf | sh -s -- -y
+  source "$HOME/.cargo/env"
+fi
 
 # Raise file descriptor limit for many concurrent sockets (best-effort)
 if command -v prlimit >/dev/null 2>&1; then
-  sudo prlimit --nofile=1048576:1048576 $$ || true
+  sudo prlimit --pid $$ --nofile=1048576:1048576 || true
 else
   ulimit -n 1048576 || true
 fi
 
 # Build benchmark client
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "Error: cargo not found. Install Rust toolchain first (https://rustup.rs)." >&2
-  exit 1
-fi
-
 cargo build --release --bin benchmark-client
 
 # Run benchmark
