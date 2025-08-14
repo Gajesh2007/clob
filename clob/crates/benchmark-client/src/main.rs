@@ -115,39 +115,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("--- Allowing 2s for deposits to be processed ---");
     time::sleep(Duration::from_secs(2)).await;
 
-    // 2. Set up UDP listener for multicast.
-    let multicast_addr = "239.0.0.1:9000".parse::<SocketAddr>()?;
-    let bind_addr = "0.0.0.0:9000".parse::<SocketAddr>()?;
-    let std_socket = std::net::UdpSocket::bind(bind_addr)?;
-    // Extract IPv4 address for multicast join
-    let multi_v4 = match multicast_addr.ip() {
-        std::net::IpAddr::V4(ipv4) => ipv4,
-        _ => return Err("Multicast address must be IPv4".into()),
-    };
-    std_socket.join_multicast_v4(&multi_v4, &Ipv4Addr::UNSPECIFIED)?;
-    let udp_socket = UdpSocket::from_std(std_socket)?;
-    info!("Listening for market data on {}", multicast_addr);
-
-    // 3. Set up counters and run duration.
+    // 2. Set up counters and run duration.
     let trade_count = Arc::new(AtomicU64::new(0));
     let test_duration = Duration::from_secs(args.duration_secs);
     let tcp_addr = Arc::new(args.tcp_addr);
     let market_id = args.market_id;
 
-    // 4. Listen for trades in a separate task to count them.
+    // 3. Listen for trades on Redis Pub/Sub in a separate task to count them.
     let trade_count_clone = trade_count.clone();
+    let events_channel = format!("market-events:{}", market_id);
+    let mut pubsub_conn = redis_client.get_async_connection().await?.into_pubsub();
+    pubsub_conn.subscribe(events_channel).await?;
+    
     tokio::spawn(async move {
-        let mut recv_buf = [0u8; 1024];
-        info!("Trade counter started.");
-        while let Ok(Ok(len)) = time::timeout(test_duration + Duration::from_secs(5), udp_socket.recv(&mut recv_buf)).await {
-            if let Ok(MarketEvent::OrderTraded(_)) = bincode::deserialize(&recv_buf[..len]) {
+        let mut message_stream = pubsub_conn.on_message();
+        info!("Trade counter started on Redis.");
+        while let Ok(Ok(msg)) = time::timeout(test_duration + Duration::from_secs(5), message_stream.next()).await {
+            let payload: Vec<u8> = msg.get_payload().unwrap();
+            if let Ok(MarketEvent::OrderTraded(_)) = bincode::deserialize(&payload) {
                 trade_count_clone.fetch_add(1, Ordering::SeqCst);
             }
         }
         info!("Trade counter finished.");
     });
 
-    // 5. Start sending orders from all traders concurrently.
+    // 4. Start sending orders from all traders concurrently.
     info!("--- Starting benchmark for {} seconds ---", args.duration_secs);
     let start_time = Instant::now();
     let mut handles = Vec::new();
