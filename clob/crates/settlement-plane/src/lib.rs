@@ -117,6 +117,7 @@ pub async fn run_settlement_plane(settings: Settings) -> Result<(), SettlementPl
     info!("Running settlement plane");
     let http_client = Client::new();
     let redis_addr = env::var("REDIS_ADDR").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+    info!(redis_addr = %redis_addr, "Connecting to Redis");
     let redis_client = redis::Client::open(redis_addr)?;
     // Use standard async connection for PubSub; multiplexed connections don't support into_pubsub
     let mut pubsub = redis_client.get_async_connection().await?.into_pubsub();
