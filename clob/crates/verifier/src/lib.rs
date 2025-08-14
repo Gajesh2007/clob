@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use reqwest::Client;
 use dashmap::DashMap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -11,6 +12,7 @@ use matching_engine::MatchingEngine;
 use configuration::Settings;
 use thiserror::Error;
 use redis::AsyncCommands;
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum VerifierError {
@@ -32,19 +34,49 @@ use merkle::MerkleTree;
 #[derive(Deserialize)]
 struct L1Checkpoint {
     state_root: String,
+    #[serde(default)]
+    da_certificate: Option<String>,
 }
 
 pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
-    let mut checkpoint_file = File::open(&settings.verifier.checkpoint_file_path).await?;
-    let mut checkpoint_bytes = Vec::new();
-    checkpoint_file.read_to_end(&mut checkpoint_bytes).await?;
-    let official_checkpoint: L1Checkpoint = serde_json::from_slice(&checkpoint_bytes)?;
+    // Try Redis first for the latest checkpoint, fall back to file if missing
+    let redis_client = redis::Client::open("redis://127.0.0.1/")?;
+    let mut redis_conn = redis_client.get_async_connection().await?;
+    let checkpoint_json: Option<String> = redis::cmd("GET").arg("checkpoint:latest").query_async(&mut redis_conn).await?;
+    let official_checkpoint: L1Checkpoint = if let Some(json) = checkpoint_json {
+        serde_json::from_str(&json)?
+    } else {
+        let mut checkpoint_file = File::open(&settings.verifier.checkpoint_file_path).await?;
+        let mut checkpoint_bytes = Vec::new();
+        checkpoint_file.read_to_end(&mut checkpoint_bytes).await?;
+        serde_json::from_slice(&checkpoint_bytes)?
+    };
+
+    // Best-effort: verify DA availability by fetching the blob via EigenDA proxy using the cert.
+    if let Some(cert_hex) = official_checkpoint.da_certificate.as_ref() {
+        let put_url = &settings.settlement_plane.eigenda_proxy_url;
+        // Replace "/put" with "/get/<hex>" while keeping query params (e.g., commitment_mode)
+        let get_url = put_url.replacen("/put", &format!("/get/{}", cert_hex), 1);
+        if let Ok(client) = Client::builder().build() {
+            match client.get(get_url.clone()).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("Fetched blob from EigenDA proxy successfully for verification");
+                }
+                Ok(resp) => {
+                    tracing::warn!(status = %resp.status(), "EigenDA proxy GET did not succeed; falling back to Redis-only verification");
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "EigenDA proxy GET failed; falling back to Redis-only verification");
+                }
+            }
+        }
+    } else {
+        tracing::warn!("No DA certificate present in checkpoint; skipping EigenDA fetch and using Redis-only verification");
+    }
 
     // The verifier now needs to fetch the log from the DA layer.
     // For this simulation, we assume the DA layer is Redis itself,
     // and we can read the log by fetching all messages from a list.
-    let redis_client = redis::Client::open("redis://127.0.0.1/")?;
-    let mut redis_conn = redis_client.get_async_connection().await?;
     let log_entries: Vec<Vec<u8>> = redis_conn.lrange("execution_log", 0, -1).await?;
 
     let mut local_order_book = OrderBook::new();
@@ -85,9 +117,15 @@ pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
     }
 
     let mut leaves: Vec<Hash> = Vec::new();
-    for entry in local_account_cache.iter() {
+    // Deterministic ordering: sort accounts by UserID to match settlement-plane
+    let mut account_entries: Vec<(UserID, Account)> = local_account_cache
+        .iter()
+        .map(|e| (*e.key(), e.value().clone()))
+        .collect();
+    account_entries.sort_by_key(|(user_id, _)| *user_id);
+    for (_user_id, account) in account_entries {
         let mut hasher = Sha256::new();
-        hasher.update(&bincode::serialize(entry.value())?);
+        hasher.update(&bincode::serialize(&account)?);
         leaves.push(hasher.finalize().into());
     }
     for (_price, price_level) in &local_order_book.bids {
@@ -109,8 +147,8 @@ pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
     let local_state_root = local_merkle_tree.root();
     let local_state_root_hex = hex::encode(local_state_root);
 
-    println!("Official State Root: 0x{}", official_checkpoint.state_root);
-    println!("Local State Root:    0x{}", local_state_root_hex);
+    info!("Official State Root: 0x{}", official_checkpoint.state_root);
+    info!("Local State Root:    0x{}", local_state_root_hex);
 
     Ok(local_state_root_hex == official_checkpoint.state_root)
 }

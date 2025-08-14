@@ -84,22 +84,22 @@ This will return a JSON response with the new `user_id` and `private_key_hex`. *
 
 ```bash
 curl -X POST http://127.0.0.1:9090/deposit \
--H "Content-Type: application/json" \
--d '{ 
-    "user_id": { "0": NEW_USER_ID },
-    "asset_id": { "0": 1 },
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": NEW_USER_ID,
+    "asset_id": 1,
     "amount": "10000.0"
-}'
+  }'
 ```
 *(Replace `NEW_USER_ID` with the user ID from the previous step.)*
 
 **C. Submit a Trade:**
 
-Use the `benchmark-client` to submit a signed order.
+Use the `benchmark-client` to submit a signed order. This would likely not provide you a confirmation if you're running locally.
 
 ```bash
-# Replace the hex string with the private key you copied
-cargo run --release --bin benchmark-client PASTE_PRIVATE_KEY_HEX_HERE
+# Replace the hex and user_id with values from the Create User response
+cargo run --release --bin benchmark-client PASTE_PRIVATE_KEY_HEX_HERE NEW_USER_ID [MARKET_ID]
 ```
 
 **D. Verify the System:**

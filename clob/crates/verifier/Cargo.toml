@@ -22,11 +22,13 @@ rust_decimal_macros = "1.35"
 configuration = { path = "../configuration" }
 thiserror = "1.0"
 redis = { version = "0.25", features = ["tokio-comp"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 ingress-verifier = { path = "../ingress-verifier" }
 market-matcher = { path = "../market-matcher" }
 settlement-plane = { path = "../settlement-plane" }
 ed25519-dalek = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
 redis-test = "0.2"

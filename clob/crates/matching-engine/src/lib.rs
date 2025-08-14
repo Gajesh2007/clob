@@ -1,6 +1,5 @@
-use common_types::{MarketEvent, Order, Price, Side, Trade, TradeID, OrderBook, PriceLevel};
+use common_types::{MarketEvent, Order, Side, Trade, TradeID, OrderBook, PriceLevel};
 use rust_decimal::Decimal;
-use std::collections::BTreeMap;
 
 pub trait MatchingEngine {
     fn process_order(&mut self, order: Order) -> Vec<MarketEvent>;

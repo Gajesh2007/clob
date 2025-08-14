@@ -21,3 +21,7 @@ configuration = { path = "../configuration" }
 thiserror = "1.0"
 redis = { version = "0.25", features = ["tokio-comp"] }
 futures-util = "0.3"
+matching-engine = { path = "../matching-engine" }
+dashmap = "5.5.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

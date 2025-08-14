@@ -19,7 +19,6 @@ pub struct ExecutionPlane {
 pub struct SettlementPlane {
     pub checkpoint_interval_seconds: u64,
     pub eigenda_proxy_url: String,
-    pub state_snapshot_url: String,
     pub checkpoint_file_path: String,
 }
 
@@ -43,7 +42,6 @@ impl Settings {
             .set_default("execution_plane.execution_log_path", "execution.log")?
             .set_default("settlement_plane.checkpoint_interval_seconds", 5)?
             .set_default("settlement_plane.eigenda_proxy_url", "http://127.0.0.1:3100/put?commitment_mode=standard")?
-            .set_default("settlement_plane.state_snapshot_url", "http://127.0.0.1:9090/state")?
             .set_default("settlement_plane.checkpoint_file_path", "checkpoint.json")?
             .set_default("verifier.checkpoint_file_path", "checkpoint.json")?
             .set_default("verifier.execution_log_path", "execution.log")?
