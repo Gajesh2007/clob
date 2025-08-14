@@ -52,8 +52,7 @@ struct DepositRequest {
 async fn create_and_fund_user(
     http_client: &reqwest::Client,
     http_addr: &str,
-    asset_id: u32,
-    amount: Decimal,
+    assets: &[(u32, Decimal)],
 ) -> Result<(UserID, SigningKey), Box<dyn Error>> {
     let create_user_url = format!("http://{}/users", http_addr);
     let resp = http_client.post(&create_user_url).send().await?.json::<CreateUserResponse>().await?;
@@ -62,10 +61,12 @@ async fn create_and_fund_user(
     let signing_key = SigningKey::from_bytes(&private_key_bytes.try_into().unwrap());
     info!(user_id = %user_id, "Created user");
 
-    let deposit_url = format!("http://{}/deposit", http_addr);
-    let deposit_req = DepositRequest { user_id, asset_id: AssetID(asset_id), amount };
-    http_client.post(&deposit_url).json(&deposit_req).send().await?.error_for_status()?;
-    info!(user_id = %user_id, "Funded user with {} of asset {}", amount, asset_id);
+    for (asset_id, amount) in assets {
+        let deposit_url = format!("http://{}/deposit", http_addr);
+        let deposit_req = DepositRequest { user_id, asset_id: AssetID(*asset_id), amount: *amount };
+        http_client.post(&deposit_url).json(&deposit_req).send().await?.error_for_status()?;
+        info!(user_id = %user_id, "Funded user with {} of asset {}", amount, asset_id);
+    }
     
     Ok((user_id, signing_key))
 }
@@ -82,6 +83,7 @@ async fn send_order(stream: &mut TcpStream, signed_order: &SignedOrder) -> Resul
 struct Trader {
     user_id: UserID,
     signing_key: SigningKey,
+    side: Side,
 }
 
 #[tokio::main]
@@ -102,13 +104,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("--- Setting up benchmark traders ---");
     let mut traders = Vec::new();
     for i in 0..args.num_traders {
-        let (buy_user_id, buy_signing_key) = create_and_fund_user(&http_client, &args.http_addr, 1, dec!(1_000_000.0)).await?;
-        let (sell_user_id, sell_signing_key) = create_and_fund_user(&http_client, &args.http_addr, 2, dec!(10_000.0)).await?;
-        traders.push(Trader { user_id: buy_user_id, signing_key: buy_signing_key });
-        traders.push(Trader { user_id: sell_user_id, signing_key: sell_signing_key });
+        let (buy_user_id, buy_signing_key) = create_and_fund_user(&http_client, &args.http_addr, &[(1, dec!(1_000_000.0)), (2, dec!(10_000.0))]).await?;
+        let (sell_user_id, sell_signing_key) = create_and_fund_user(&http_client, &args.http_addr, &[(1, dec!(1_000_000.0)), (2, dec!(10_000.0))]).await?;
+        traders.push(Trader { user_id: buy_user_id, signing_key: buy_signing_key, side: Side::Buy });
+        traders.push(Trader { user_id: sell_user_id, signing_key: sell_signing_key, side: Side::Sell });
         info!("Created trader pair {}", i + 1);
     }
     info!("--------------------------\n");
+
+    info!("--- Allowing 2s for deposits to be processed ---");
+    time::sleep(Duration::from_secs(2)).await;
 
     // 2. Set up UDP listener for multicast.
     let multicast_addr = "239.0.0.1:9000".parse::<SocketAddr>()?;
@@ -162,12 +167,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
 
             while Instant::now() - start_time < test_duration {
-                let side = if rng.gen() { Side::Buy } else { Side::Sell };
                 let order = Order {
                     order_id: OrderID(rng.gen()),
                     user_id: trader.user_id,
                     market_id: MarketID(market_id),
-                    side,
+                    side: trader.side,
                     price: dec!(100.0) + Decimal::from(rng.gen_range(-5..=5)),
                     quantity: dec!(1.0),
                     order_type: OrderType::Limit,

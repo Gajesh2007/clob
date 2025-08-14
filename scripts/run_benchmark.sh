@@ -42,18 +42,25 @@ while getopts ":H:T:R:m:t:d:l:" opt; do
   esac
 done
 
-# Resolve repo root: prefer this script's repo; fall back to /opt/nasdaq/clob; else clone
+# Resolve repo root: prefer this script's repo; fall back to common locations; else use current dir if valid; else clone
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CANDIDATE_ROOT="${SCRIPT_DIR%/scripts}"
-if [[ -f "$CANDIDATE_ROOT/Cargo.toml" ]]; then
-  REPO_ROOT="$CANDIDATE_ROOT"
-elif [[ -f "/opt/nasdaq/clob/Cargo.toml" ]]; then
+CANDIDATE_BASE="${SCRIPT_DIR%/scripts}"
+if [[ -f "$CANDIDATE_BASE/Cargo.toml" && -d "$CANDIDATE_BASE/crates/benchmark-client" ]]; then
+  REPO_ROOT="$CANDIDATE_BASE"
+elif [[ -f "$CANDIDATE_BASE/clob/Cargo.toml" && -d "$CANDIDATE_BASE/clob/crates/benchmark-client" ]]; then
+  REPO_ROOT="$CANDIDATE_BASE/clob"
+elif [[ -f "/opt/nasdaq/clob/Cargo.toml" && -d "/opt/nasdaq/clob/crates/benchmark-client" ]]; then
   REPO_ROOT="/opt/nasdaq/clob"
+elif [[ -f "/opt/nasdaq/NASDAQ/clob/Cargo.toml" && -d "/opt/nasdaq/NASDAQ/clob/crates/benchmark-client" ]]; then
+  REPO_ROOT="/opt/nasdaq/NASDAQ/clob"
+elif [[ -f "$PWD/Cargo.toml" && -d "$PWD/crates/benchmark-client" ]]; then
+  REPO_ROOT="$PWD"
 else
-  sudo mkdir -p /opt/nasdaq
-  sudo chown -R "$USER":"$USER" /opt/nasdaq || true
-  git clone "$REPO_URL" /opt/nasdaq/clob
-  REPO_ROOT="/opt/nasdaq/clob"
+  echo "No Cargo.toml workspace found; cloning to /opt/nasdaq/NASDAQ/clob..."
+  sudo mkdir -p /opt/nasdaq/NASDAQ
+  sudo chown -R "$USER":"$USER" /opt/nasdaq/NASDAQ || true
+  git clone "$REPO_URL" /opt/nasdaq/NASDAQ/clob
+  REPO_ROOT="/opt/nasdaq/NASDAQ/clob"
 fi
 cd "$REPO_ROOT"
 
