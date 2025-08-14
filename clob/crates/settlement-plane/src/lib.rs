@@ -10,6 +10,7 @@ use thiserror::Error;
 use futures_util::StreamExt;
 use matching_engine::MatchingEngine;
 use std::collections::BTreeMap;
+use std::env;
 use dashmap::DashMap;
 use redis::AsyncCommands;
 use tracing::{info, error, debug};
@@ -115,7 +116,8 @@ async fn submit_checkpoint_to_l1(file_path: &str, state_root: [u8; 32], da_certi
 pub async fn run_settlement_plane(settings: Settings) -> Result<(), SettlementPlaneError> {
     info!("Running settlement plane");
     let http_client = Client::new();
-    let redis_client = redis::Client::open("redis://127.0.0.1/")?;
+    let redis_addr = env::var("REDIS_ADDR").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+    let redis_client = redis::Client::open(redis_addr)?;
     // Use standard async connection for PubSub; multiplexed connections don't support into_pubsub
     let mut pubsub = redis_client.get_async_connection().await?.into_pubsub();
     pubsub.psubscribe("market:*").await?;
