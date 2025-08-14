@@ -35,7 +35,7 @@ type PublicKeyCache = Arc<DashMap<UserID, VerifyingKey>>;
 async fn handle_connection(
     mut stream: TcpStream,
     public_key_cache: PublicKeyCache,
-    redis_client: redis::Client,
+    mut redis_conn: redis::aio::MultiplexedConnection,
 ) -> Result<(), IngressError> {
     loop {
         // Use length-prefix framing to read multiple orders from one connection
@@ -56,13 +56,15 @@ async fn handle_connection(
         let message_bytes = bincode::serialize(&order)?;
         public_key.verify(&message_bytes, &signed_order.signature.0)?;
         
-        let mut redis_conn = redis_client.get_async_connection().await?;
         let channel = format!("market:{}", order.market_id.0);
         let tx = Transaction::SignedOrder(signed_order);
         let payload = bincode::serialize(&tx)?;
         
-        let _: i64 = redis_conn.publish(channel, payload.clone()).await?;
-        let _: i64 = redis_conn.rpush("execution_log", payload).await?;
+        redis::pipe()
+            .publish(channel, payload.clone())
+            .rpush("execution_log", payload)
+            .query_async(&mut redis_conn)
+            .await?;
     }
     
     Ok(())
@@ -75,7 +77,7 @@ struct DepositRequest { user_id: UserID, asset_id: AssetID, amount: Decimal }
 
 async fn run_http_server(
     public_key_cache: PublicKeyCache,
-    redis_client: redis::Client,
+    mut redis_conn: redis::aio::MultiplexedConnection,
     addr: std::net::SocketAddr,
 ) {
     let create_user_route = warp::post()
@@ -92,17 +94,23 @@ async fn run_http_server(
             warp::reply::json(&CreateUserResponse { user_id, private_key_hex: hex::encode(signing_key.to_bytes()) })
         });
 
+    let redis_conn_clone = redis_conn.clone();
     let deposit_route = warp::post()
         .and(warp::path("deposit"))
-        .and(warp::any().map(move || redis_client.clone()))
+        .and(warp::any().map(move || redis_conn_clone.clone()))
         .and(warp::body::json())
-        .and_then(|client: redis::Client, req: DepositRequest| async move {
+        .and_then(|mut client: redis::aio::MultiplexedConnection, req: DepositRequest| async move {
             let deposit = Deposit { user_id: req.user_id, asset_id: req.asset_id, amount: req.amount };
             let tx = Transaction::Deposit(deposit);
             let payload = bincode::serialize(&tx).unwrap();
-            let mut conn = client.get_async_connection().await.unwrap();
-            let _: i64 = conn.publish("deposits", payload.clone()).await.unwrap();
-            let _: i64 = conn.rpush("execution_log", payload).await.unwrap();
+
+            redis::pipe()
+                .publish("deposits", payload.clone())
+                .rpush("execution_log", payload)
+                .query_async(&mut client)
+                .await
+                .map_err(|_| warp::reject())?;
+
             Ok::<_, warp::Rejection>(warp::reply::with_status("Deposit processed", warp::http::StatusCode::OK))
         });
 
@@ -117,9 +125,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
     let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
+    let redis_conn = redis_client.get_multiplexed_async_connection().await?;
 
     let http_addr = settings.execution_plane.http_listen_addr.parse()?;
-    tokio::spawn(run_http_server(public_key_cache.clone(), redis_client.clone(), http_addr));
+    tokio::spawn(run_http_server(public_key_cache.clone(), redis_conn.clone(), http_addr));
 
     let listener = TcpListener::bind(&settings.execution_plane.tcp_listen_addr).await?;
     info!("Ingress-Verifier listening on {}", &settings.execution_plane.tcp_listen_addr);
@@ -127,10 +136,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         let (socket, _) = listener.accept().await?;
         let pk_clone = public_key_cache.clone();
-        let redis_clone = redis_client.clone();
+        let redis_clone = redis_conn.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(socket, pk_clone, redis_clone).await {
-                tracing::error!("Connection error: {}", e);
+                if e.to_string().contains("early eof") {
+                    // This is a graceful disconnect, not an error.
+                    tracing::debug!("Client disconnected gracefully.");
+                } else {
+                    tracing::error!("Connection error: {}", e);
+                }
             }
         });
     }
