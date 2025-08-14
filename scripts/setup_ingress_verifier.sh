@@ -25,7 +25,7 @@ cat > config.toml <<EOF
 redis_addr = "redis://${REDIS_IP}:6379/"
 [settlement_plane]
 checkpoint_interval_seconds = 5
-eigenda_proxy_url = "http://127.0.0.1:3100/put?commitment_mode=standard"
+eigenda_proxy_url = "http://10.10.0.3:3100/put?commitment_mode=standard"
 checkpoint_file_path = "checkpoint.json"
 [verifier]
 checkpoint_file_path = "checkpoint.json"
@@ -38,6 +38,8 @@ execution_log_path = "execution.log"
 addr = "239.0.0.1:9000"
 bind_addr = "0.0.0.0:0"
 EOF
+
+export RUST_LOG=info
 
 # 4. Create and run systemd service
 cargo build --release --bin ingress-verifier
