@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use common_types::{SignedOrder, UserID, Deposit, Transaction, AssetID};
 use configuration::Settings;
 use ed25519_dalek::{Verifier, VerifyingKey, SigningKey};
@@ -37,22 +37,33 @@ async fn handle_connection(
     public_key_cache: PublicKeyCache,
     redis_client: redis::Client,
 ) -> Result<(), IngressError> {
-    let mut buffer = Vec::new();
-    stream.read_to_end(&mut buffer).await?;
-    let signed_order: SignedOrder = bincode::deserialize(&buffer)?;
-    let order = signed_order.order;
+    loop {
+        // Use length-prefix framing to read multiple orders from one connection
+        let len = match stream.read_u32().await {
+            Ok(len) => len,
+            // A "closed" error means the client gracefully disconnected.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        };
 
-    let public_key = public_key_cache.get(&order.user_id).ok_or(IngressError::PublicKeyNotFound(order.user_id))?;
-    let message_bytes = bincode::serialize(&order)?;
-    public_key.verify(&message_bytes, &signed_order.signature.0)?;
-    
-    let mut redis_conn = redis_client.get_async_connection().await?;
-    let channel = format!("market:{}", order.market_id.0);
-    let tx = Transaction::SignedOrder(signed_order);
-    let payload = bincode::serialize(&tx)?;
-    
-    let _: i64 = redis_conn.publish(channel, payload.clone()).await?;
-    let _: i64 = redis_conn.rpush("execution_log", payload).await?;
+        let mut buffer = vec![0; len as usize];
+        stream.read_exact(&mut buffer).await?;
+
+        let signed_order: SignedOrder = bincode::deserialize(&buffer)?;
+        let order = signed_order.order;
+
+        let public_key = public_key_cache.get(&order.user_id).ok_or(IngressError::PublicKeyNotFound(order.user_id))?;
+        let message_bytes = bincode::serialize(&order)?;
+        public_key.verify(&message_bytes, &signed_order.signature.0)?;
+        
+        let mut redis_conn = redis_client.get_async_connection().await?;
+        let channel = format!("market:{}", order.market_id.0);
+        let tx = Transaction::SignedOrder(signed_order);
+        let payload = bincode::serialize(&tx)?;
+        
+        let _: i64 = redis_conn.publish(channel, payload.clone()).await?;
+        let _: i64 = redis_conn.rpush("execution_log", payload).await?;
+    }
     
     Ok(())
 }

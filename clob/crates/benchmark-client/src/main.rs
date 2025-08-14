@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::time::{Instant, Duration};
+use tokio::time::{self, Instant, Duration};
 use tokio::io::AsyncWriteExt;
 use common_types::{
     Order, SignedOrder, Side, OrderType, OrderID, UserID, MarketID, Signature, AssetID, MarketEvent
@@ -11,7 +13,28 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
 use rand::Rng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use redis::AsyncCommands;
+use clap::Parser;
+use tracing::{info, error};
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long, default_value_t = String::from("127.0.0.1:9090"))]
+    http_addr: String,
+    #[arg(long, default_value_t = String::from("127.0.0.1:8080"))]
+    tcp_addr: String,
+    #[arg(long, default_value_t = String::from("redis://127.0.0.1/"))]
+    redis_addr: String,
+    #[arg(long, default_value_t = 1)]
+    market_id: u32,
+    #[arg(long, default_value_t = 10)]
+    num_traders: u32,
+    #[arg(long, default_value_t = 30)]
+    duration_secs: u64,
+}
 
 #[derive(Deserialize, Debug)]
 struct CreateUserResponse {
@@ -32,133 +55,157 @@ async fn create_and_fund_user(
     asset_id: u32,
     amount: Decimal,
 ) -> Result<(UserID, SigningKey), Box<dyn Error>> {
-    // 1. Create user
-    let create_user_url = format!("{}/users", http_addr);
+    let create_user_url = format!("http://{}/users", http_addr);
     let resp = http_client.post(&create_user_url).send().await?.json::<CreateUserResponse>().await?;
     let user_id = resp.user_id;
     let private_key_bytes = hex::decode(resp.private_key_hex)?;
     let signing_key = SigningKey::from_bytes(&private_key_bytes.try_into().unwrap());
-    println!("Created user {}.", user_id);
+    info!(user_id = %user_id, "Created user");
 
-    // 2. Fund user
-    let deposit_url = format!("{}/deposit", http_addr);
+    let deposit_url = format!("http://{}/deposit", http_addr);
     let deposit_req = DepositRequest { user_id, asset_id: AssetID(asset_id), amount };
     http_client.post(&deposit_url).json(&deposit_req).send().await?.error_for_status()?;
-    println!("Funded user {} with {} of asset {}.", user_id, amount, asset_id);
+    info!(user_id = %user_id, "Funded user with {} of asset {}", amount, asset_id);
     
     Ok((user_id, signing_key))
 }
 
-async fn send_order(tcp_addr: &str, signed_order: &SignedOrder) -> Result<(), Box<dyn Error>> {
+async fn send_order(stream: &mut TcpStream, signed_order: &SignedOrder) -> Result<(), Box<dyn Error + Send + Sync>> {
     let payload = bincode::serialize(signed_order)?;
-    let mut stream = TcpStream::connect(tcp_addr).await?;
+    // Use length-prefix framing to send multiple orders on one connection
+    let len = payload.len() as u32;
+    stream.write_u32(len).await?;
     stream.write_all(&payload).await?;
-    stream.shutdown().await?;
     Ok(())
+}
+
+struct Trader {
+    user_id: UserID,
+    signing_key: SigningKey,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    let market_id: u32 = if args.len() > 1 { args[1].parse()? } else { 1 };
+    tracing_subscriber::fmt::init();
+    let args = Args::parse();
 
     let http_client = reqwest::Client::new();
-    let ingress_http_addr = "http://127.0.0.1:9090";
-    let ingress_tcp_addr = "127.0.0.1:8080";
-    let redis_addr = "redis://127.0.0.1/";
 
     // 0. Clear the execution log from previous runs for a clean state.
-    println!("--- Clearing previous state ---");
-    let redis_client = redis::Client::open(redis_addr)?;
+    info!("--- Clearing previous state ---");
+    let redis_client = redis::Client::open(args.redis_addr.as_str())?;
     let mut redis_conn = redis_client.get_async_connection().await?;
     let _: () = redis_conn.del("execution_log").await?;
-    println!("State cleared.");
+    info!("State cleared.");
 
-    // 1. Create and fund two users.
-    println!("--- Setting up benchmark ---");
-    let (maker_user_id, maker_signing_key) = create_and_fund_user(&http_client, ingress_http_addr, 2, dec!(100.0)).await?;
-    let (taker_user_id, taker_signing_key) = create_and_fund_user(&http_client, ingress_http_addr, 1, dec!(10000.0)).await?;
-    println!("--------------------------\n");
+    // 1. Create and fund a pool of traders.
+    info!("--- Setting up benchmark traders ---");
+    let mut traders = Vec::new();
+    for i in 0..args.num_traders {
+        let (buy_user_id, buy_signing_key) = create_and_fund_user(&http_client, &args.http_addr, 1, dec!(1_000_000.0)).await?;
+        let (sell_user_id, sell_signing_key) = create_and_fund_user(&http_client, &args.http_addr, 2, dec!(10_000.0)).await?;
+        traders.push(Trader { user_id: buy_user_id, signing_key: buy_signing_key });
+        traders.push(Trader { user_id: sell_user_id, signing_key: sell_signing_key });
+        info!("Created trader pair {}", i + 1);
+    }
+    info!("--------------------------\n");
 
     // 2. Set up UDP listener for multicast.
     let multicast_addr = "239.0.0.1:9000".parse::<SocketAddr>()?;
     let bind_addr = "0.0.0.0:9000".parse::<SocketAddr>()?;
     let std_socket = std::net::UdpSocket::bind(bind_addr)?;
-    if let SocketAddr::V4(addr) = multicast_addr {
-        std_socket.join_multicast_v4(addr.ip(), &Ipv4Addr::UNSPECIFIED)?;
-    } else {
-        return Err("Multicast address must be IPv4".into());
-    }
+    // Extract IPv4 address for multicast join
+    let multi_v4 = match multicast_addr.ip() {
+        std::net::IpAddr::V4(ipv4) => ipv4,
+        _ => return Err("Multicast address must be IPv4".into()),
+    };
+    std_socket.join_multicast_v4(&multi_v4, &Ipv4Addr::UNSPECIFIED)?;
     let udp_socket = UdpSocket::from_std(std_socket)?;
-    println!("Listening for market data on {}", multicast_addr);
+    info!("Listening for market data on {}", multicast_addr);
 
-    // 3. Maker places a SELL order.
-    let maker_order = Order {
-        order_id: OrderID(rand::thread_rng().gen()),
-        user_id: maker_user_id,
-        market_id: MarketID(market_id),
-        side: Side::Sell,
-        price: dec!(100.0),
-        quantity: dec!(1.0),
-        order_type: OrderType::Limit,
-        timestamp: 0,
-    };
-    let maker_message_bytes = bincode::serialize(&maker_order)?;
-    let maker_signature = maker_signing_key.sign(&maker_message_bytes);
-    let maker_signed_order = SignedOrder { order: maker_order, signature: Signature(maker_signature) };
-    
-    println!("\nMaker submitting SELL order {:?}...", maker_order.order_id);
-    send_order(ingress_tcp_addr, &maker_signed_order).await?;
+    // 3. Set up counters and run duration.
+    let trade_count = Arc::new(AtomicU64::new(0));
+    let test_duration = Duration::from_secs(args.duration_secs);
+    let tcp_addr = Arc::new(args.tcp_addr);
+    let market_id = args.market_id;
 
-    // 4. Wait for the maker's order to be placed on the book.
-    let mut recv_buf = [0u8; 1024];
-    println!("Waiting for order placement confirmation...");
-    loop {
-        let len = udp_socket.recv(&mut recv_buf).await?;
-        if let Ok(MarketEvent::OrderPlaced { order_id, .. }) = bincode::deserialize(&recv_buf[..len]) {
-            if order_id == maker_order.order_id {
-                println!("Maker's order {:?} confirmed on book.", maker_order.order_id);
-                break;
+    // 4. Listen for trades in a separate task to count them.
+    let trade_count_clone = trade_count.clone();
+    tokio::spawn(async move {
+        let mut recv_buf = [0u8; 1024];
+        info!("Trade counter started.");
+        while let Ok(Ok(len)) = time::timeout(test_duration + Duration::from_secs(5), udp_socket.recv(&mut recv_buf)).await {
+            if let Ok(MarketEvent::OrderTraded(_)) = bincode::deserialize(&recv_buf[..len]) {
+                trade_count_clone.fetch_add(1, Ordering::SeqCst);
             }
         }
-    }
+        info!("Trade counter finished.");
+    });
 
-    // 5. Taker places a matching BUY order.
-    let taker_order = Order {
-        order_id: OrderID(rand::thread_rng().gen()),
-        user_id: taker_user_id,
-        market_id: MarketID(market_id),
-        side: Side::Buy,
-        price: dec!(100.0),
-        quantity: dec!(1.0),
-        order_type: OrderType::Limit,
-        timestamp: 0,
-    };
-    let taker_message_bytes = bincode::serialize(&taker_order)?;
-    let taker_signature = taker_signing_key.sign(&taker_message_bytes);
-    let taker_signed_order = SignedOrder { order: taker_order, signature: Signature(taker_signature) };
-
-    println!("\nTaker submitting matching BUY order {:?}...", taker_order.order_id);
-    
-    // 6. Send the order and measure latency.
+    // 5. Start sending orders from all traders concurrently.
+    info!("--- Starting benchmark for {} seconds ---", args.duration_secs);
     let start_time = Instant::now();
-    send_order(ingress_tcp_addr, &taker_signed_order).await?;
+    let mut handles = Vec::new();
 
-    println!("Waiting for trade confirmation...");
-    loop {
-        let len = tokio::time::timeout(Duration::from_secs(5), udp_socket.recv(&mut recv_buf)).await??;
-        if let Ok(MarketEvent::OrderTraded(trade)) = bincode::deserialize(&recv_buf[..len]) {
-            if trade.maker_order_id == maker_order.order_id && trade.taker_order_id == taker_order.order_id {
-                let latency = Instant::now() - start_time;
-                println!("\nReceived trade confirmation ({} bytes).\n", len);
-                println!("===========================");
-                println!("BENCHMARK RESULTS:");
-                println!("Latency: {:?}", latency);
-                println!("===========================");
-                break;
+    for trader in traders {
+        let tcp_addr_clone = tcp_addr.clone();
+        let handle = tokio::spawn(async move {
+            let mut rng = StdRng::from_entropy();
+            
+            // Each trader gets one persistent connection
+            let mut stream = match TcpStream::connect(tcp_addr_clone.as_str()).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Trader failed to connect: {}", e);
+                    return;
+                }
+            };
+
+            while Instant::now() - start_time < test_duration {
+                let side = if rng.gen() { Side::Buy } else { Side::Sell };
+                let order = Order {
+                    order_id: OrderID(rng.gen()),
+                    user_id: trader.user_id,
+                    market_id: MarketID(market_id),
+                    side,
+                    price: dec!(100.0) + Decimal::from(rng.gen_range(-5..=5)),
+                    quantity: dec!(1.0),
+                    order_type: OrderType::Limit,
+                    timestamp: 0,
+                };
+                let message_bytes = bincode::serialize(&order).unwrap();
+                let signature = trader.signing_key.sign(&message_bytes);
+                let signed_order = SignedOrder { order, signature: Signature(signature) };
+
+                if let Err(e) = send_order(&mut stream, &signed_order).await {
+                    error!("Failed to send order: {}. Closing connection.", e);
+                    break; // Exit the loop if the connection breaks
+                }
             }
-        }
+        });
+        handles.push(handle);
     }
+
+    for handle in handles {
+        handle.await?;
+    }
+
+    info!("--- Benchmark finished sending orders ---");
     
+    // 6. Wait a moment for final trades to be processed.
+    time::sleep(Duration::from_secs(3)).await;
+
+    // 7. Calculate and print results.
+    let total_trades = trade_count.load(Ordering::SeqCst);
+    let elapsed_secs = start_time.elapsed().as_secs_f64();
+    let tps = total_trades as f64 / elapsed_secs;
+
+    println!("\n===========================");
+    println!("BENCHMARK RESULTS:");
+    println!("Test Duration:  {:.2} seconds", elapsed_secs);
+    println!("Total Trades:   {}", total_trades);
+    println!("Throughput:     {:.2} TPS", tps);
+    println!("===========================");
+
     Ok(())
 }
