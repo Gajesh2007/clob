@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
+    pub redis_addr: String,
     pub execution_plane: ExecutionPlane,
     pub settlement_plane: SettlementPlane,
     pub verifier: Verifier,
@@ -37,6 +38,7 @@ pub struct Multicast {
 impl Settings {
     pub fn load() -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
+            .set_default("redis_addr", "redis://127.0.0.1:6379/")?
             .set_default("execution_plane.tcp_listen_addr", "127.0.0.1:8080")?
             .set_default("execution_plane.http_listen_addr", "127.0.0.1:9090")?
             .set_default("execution_plane.execution_log_path", "execution.log")?

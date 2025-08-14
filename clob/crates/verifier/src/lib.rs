@@ -40,7 +40,8 @@ struct L1Checkpoint {
 
 pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
     // Try Redis first for the latest checkpoint, fall back to file if missing
-    let redis_client = redis::Client::open("redis://127.0.0.1/")?;
+    info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
+    let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
     let mut redis_conn = redis_client.get_async_connection().await?;
     let checkpoint_json: Option<String> = redis::cmd("GET").arg("checkpoint:latest").query_async(&mut redis_conn).await?;
     let official_checkpoint: L1Checkpoint = if let Some(json) = checkpoint_json {

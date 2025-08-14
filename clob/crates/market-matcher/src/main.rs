@@ -99,8 +99,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let settings = Settings::load()?;
     
-    let redis_addr = std::env::var("REDIS_ADDR").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
-    let redis_client = redis::Client::open(redis_addr)?;
+    tracing::info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
+    let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
     let account_cache: AccountCache = Arc::new(DashMap::new());
 
     let acc_cache_clone = account_cache.clone();

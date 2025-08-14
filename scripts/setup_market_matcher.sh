@@ -20,8 +20,26 @@ source /root/.cargo/env
 git clone "$REPO_URL" /opt/nasdaq
 cd /opt/nasdaq/clob
 
+# Create config.toml
+cat > config.toml <<EOF
+redis_addr = "redis://${REDIS_IP}:6379/"
+[settlement_plane]
+checkpoint_interval_seconds = 5
+eigenda_proxy_url = "http://127.0.0.1:3100/put?commitment_mode=standard"
+checkpoint_file_path = "checkpoint.json"
+[verifier]
+checkpoint_file_path = "checkpoint.json"
+execution_log_path = "execution.log"
+[execution_plane]
+tcp_listen_addr = "0.0.0.0:8080"
+http_listen_addr = "0.0.0.0:9090"
+execution_log_path = "execution.log"
+[multicast]
+addr = "239.0.0.1:9000"
+bind_addr = "0.0.0.0:0"
+EOF
+
 # 4. Create and run systemd service
-export REDIS_ADDR="redis://${REDIS_IP}:6379/"
 cargo build --release --bin market-matcher
 
 # This example starts a single matcher for market 1.
@@ -37,7 +55,6 @@ After=network.target
 User=root
 Group=root
 WorkingDirectory=/opt/nasdaq/clob
-Environment="REDIS_ADDR=${REDIS_ADDR}"
 ExecStart=/opt/nasdaq/clob/target/release/market-matcher ${MARKET_IDS}
 Restart=on-failure
 RestartSec=5

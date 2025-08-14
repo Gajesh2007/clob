@@ -5,6 +5,7 @@ set -euxo pipefail
 REPO_URL="https://github.com/Gajesh2007/clob.git" 
 # The internal IP of the EigenDA proxy VM you created
 EIGENDA_PROXY_IP="10.10.0.3" # Example: 10.10.0.3
+REDIS_IP="10.10.0.2"
 # ------------------------
 
 # 1. Install Dependencies
@@ -22,6 +23,7 @@ cd /opt/nasdaq/clob
 
 # Create config.toml with the internal EigenDA proxy IP
 cat > config.toml <<EOF
+redis_addr = "redis://${REDIS_IP}:6379/"
 [settlement_plane]
 checkpoint_interval_seconds = 5
 eigenda_proxy_url = "http://${EIGENDA_PROXY_IP}:3100/put?commitment_mode=standard"

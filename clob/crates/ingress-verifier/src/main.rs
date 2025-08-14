@@ -104,8 +104,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let settings = Settings::load()?;
     let public_key_cache: PublicKeyCache = Arc::new(DashMap::new());
     
-    let redis_addr = std::env::var("REDIS_ADDR").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
-    let redis_client = redis::Client::open(redis_addr)?;
+    info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
+    let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
 
     let http_addr = settings.execution_plane.http_listen_addr.parse()?;
     tokio::spawn(run_http_server(public_key_cache.clone(), redis_client.clone(), http_addr));
