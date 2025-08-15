@@ -169,12 +169,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
 
             while Instant::now() - start_time < test_duration {
+                let price_offset = match trader.side {
+                    Side::Buy  => Decimal::from(rng.gen_range(-100..=20)), // Range: 99.00 to 100.20
+                    Side::Sell => Decimal::from(rng.gen_range(-20..=100)), // Range: 99.80 to 101.00
+                } / dec!(100);
+                let price = dec!(100.0) + price_offset;
                 let order = Order {
                     order_id: OrderID(rng.gen()),
                     user_id: trader.user_id,
                     market_id: MarketID(market_id),
                     side: trader.side,
-                    price: dec!(100.0) + Decimal::from(rng.gen_range(-5..=5)),
+                    price,
                     quantity: dec!(1.0),
                     order_type: OrderType::Limit,
                     timestamp: 0,

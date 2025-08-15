@@ -78,25 +78,43 @@ async fn run_single_market(
                 if let MarketEvent::OrderTraded(trade) = event {
                     tracing::info!(trade_id = trade.trade_id.0, maker_order_id = trade.maker_order_id.0, taker_order_id = trade.taker_order_id.0, "Processed trade");
 
-                    let maker_account_opt = account_cache.get_mut(&trade.maker_user_id);
-                    let taker_account_opt = account_cache.get_mut(&trade.taker_user_id);
+                    if trade.maker_user_id == trade.taker_user_id {
+                        if let Some(mut account) = account_cache.get_mut(&trade.maker_user_id) {
+                            // Self-trade: update the single account.
+                            // The net effect on balances is zero, but we perform the operations
+                            // to maintain logical consistency with the generated trade event.
+                            let asset1 = AssetID(1);
+                            let asset2 = AssetID(2);
+                            let total_price = trade.price * trade.quantity;
 
-                    if maker_account_opt.is_none() || taker_account_opt.is_none() {
-                        tracing::error!(trade_id = trade.trade_id.0, "CRITICAL: Account not found for a processed trade. Maker found: {}, Taker found: {}. Skipping balance update.", maker_account_opt.is_some(), taker_account_opt.is_some());
-                        continue;
+                            // Taker side of the trade
+                            *account.balances.entry(asset1).or_default() -= total_price;
+                            *account.balances.entry(asset2).or_default() += trade.quantity;
+
+                            // Maker side of the trade
+                            *account.balances.entry(asset1).or_default() += total_price;
+                            *account.balances.entry(asset2).or_default() -= trade.quantity;
+                        } else {
+                             tracing::error!(trade_id = trade.trade_id.0, "CRITICAL: Account not found for a self-trade. UserID: {}. Skipping balance update.", trade.maker_user_id);
+                        }
+                    } else {
+                        // Different users, get both accounts
+                        let maker_account_opt = account_cache.get_mut(&trade.maker_user_id);
+                        let taker_account_opt = account_cache.get_mut(&trade.taker_user_id);
+
+                        if let (Some(mut maker_account), Some(mut taker_account)) = (maker_account_opt, taker_account_opt) {
+                            let asset1 = AssetID(1);
+                            let asset2 = AssetID(2);
+                            let total_price = trade.price * trade.quantity;
+                            
+                            *taker_account.balances.entry(asset1).or_default() -= total_price;
+                            *taker_account.balances.entry(asset2).or_default() += trade.quantity;
+                            *maker_account.balances.entry(asset1).or_default() += total_price;
+                            *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
+                        } else {
+                            tracing::error!(trade_id = trade.trade_id.0, "CRITICAL: Account not found for a processed trade. Maker found: {}, Taker found: {}. Skipping balance update.", maker_account_opt.is_some(), taker_account_opt.is_some());
+                        }
                     }
-
-                    let mut maker_account = maker_account_opt.unwrap();
-                    let mut taker_account = taker_account_opt.unwrap();
-
-                    let asset1 = AssetID(1);
-                    let asset2 = AssetID(2);
-                    let total_price = trade.price * trade.quantity;
-                    
-                    *taker_account.balances.entry(asset1).or_default() -= total_price;
-                    *taker_account.balances.entry(asset2).or_default() += trade.quantity;
-                    *maker_account.balances.entry(asset1).or_default() += total_price;
-                    *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
                 }
                 let event_bytes = bincode::serialize(&event)?;
                 // Publish to both UDP and Redis
