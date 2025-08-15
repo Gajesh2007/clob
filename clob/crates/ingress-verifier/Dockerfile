@@ -27,4 +27,5 @@ COPY config.toml .
 EXPOSE 8080 9090
 
 # Set the entrypoint.
+ENV RUST_LOG=info
 CMD ["ingress-verifier"]
