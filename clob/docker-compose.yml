@@ -1,0 +1,78 @@
+version: '3.8'
+
+# This defines the services that make up your application
+services:
+  # The Redis service, using the official image from Docker Hub
+  redis:
+    restart: always
+    image: redis:7-alpine
+    container_name: nasdaq-redis
+    # Expose the Redis port to the host machine for easy access
+    ports:
+      - "6379:6379"
+    networks:
+      - clob_network
+
+  # The Ingress Verifier service
+  ingress-verifier:
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Pass the binary name to our universal Dockerfile
+      args:
+        BINARY_NAME: ingress-verifier
+    container_name: nasdaq-ingress-verifier
+    ports:
+      - "8080:8080" # TCP for orders
+      - "9090:9090" # HTTP for users/deposits
+    depends_on:
+      - redis
+    networks:
+      - clob_network
+    # Override the config file to use the Redis service name
+    environment:
+      - CLOB_REDIS__ADDR=redis://redis:6379
+
+  # The Market Matcher service
+  market-matcher:
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BINARY_NAME: market-matcher
+    container_name: nasdaq-market-matcher
+    depends_on:
+      - redis
+    # Pass the market IDs as command-line arguments
+    command: ["1"]
+    networks:
+      - clob_network
+    environment:
+      - CLOB_REDIS__ADDR=redis://redis:6379
+
+  # The Benchmark Client service (optional, for testing)
+  benchmark-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BINARY_NAME: benchmark-client
+    container_name: nasdaq-benchmark-client
+    depends_on:
+      - ingress-verifier
+    # This overrides the default CMD to run the benchmark with correct service names
+    command: >
+      --http-addr ingress-verifier:9090
+      --tcp-addr ingress-verifier:8080
+      --redis-addr redis://redis:6379
+      --duration-secs 30
+      --num-traders 10
+    networks:
+      - clob_network
+
+# Define the virtual network for services to communicate
+networks:
+  clob_network:
+    driver: bridge

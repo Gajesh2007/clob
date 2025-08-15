@@ -1,0 +1,9 @@
+# Ignore the Rust build output directory. This is the most important rule.
+/target
+
+# Ignore the Git directory
+.git
+
+# Ignore local configuration files that shouldn't be in the image
+*.local
+.env
