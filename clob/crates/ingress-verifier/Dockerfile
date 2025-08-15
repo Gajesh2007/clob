@@ -5,7 +5,7 @@ FROM rust:1-slim-bookworm as builder
 WORKDIR /usr/src/clob
 
 # Copy the entire workspace to ensure all local dependencies are available.
-COPY ../../. .
+COPY . .
 
 # Build only the ingress-verifier binary in release mode.
 RUN cargo build --release --bin ingress-verifier
@@ -21,7 +21,7 @@ WORKDIR /app
 COPY --from=builder /usr/src/clob/target/release/ingress-verifier /usr/local/bin/
 
 # Copy the configuration file.
-COPY ../../config.toml .
+COPY config.toml .
 
 # Expose the TCP and HTTP ports.
 EXPOSE 8080 9090

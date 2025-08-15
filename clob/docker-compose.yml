@@ -65,6 +65,34 @@ services:
     networks:
       - clob_network
 
+  # The Settlement Plane service
+  settlement-plane:
+    restart: always
+    build:
+      context: .
+      dockerfile: crates/settlement-plane/Dockerfile
+    container_name: nasdaq-settlement-plane
+    depends_on:
+      - redis
+    networks:
+      - clob_network
+    environment:
+      - CLOB_REDIS__ADDR=redis://redis:6379
+
+  # The Verifier service
+  verifier:
+    restart: always
+    build:
+      context: .
+      dockerfile: crates/verifier/Dockerfile
+    container_name: nasdaq-verifier
+    depends_on:
+      - redis
+    networks:
+      - clob_network
+    environment:
+      - CLOB_REDIS__ADDR=redis://redis:6379
+
 # Define the virtual network for services to communicate
 networks:
   clob_network:

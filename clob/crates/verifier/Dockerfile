@@ -1,5 +1,5 @@
 # Stage 1: Builder
-# Compiles the benchmark-client binary.
+# Compiles the verifier binary.
 FROM rust:1-slim-bookworm as builder
 
 WORKDIR /usr/src/clob
@@ -7,8 +7,8 @@ WORKDIR /usr/src/clob
 # Copy the entire workspace to ensure all local dependencies are available.
 COPY . .
 
-# Build only the benchmark-client binary in release mode.
-RUN cargo build --release --bin benchmark-client
+# Build only the verifier binary in release mode.
+RUN cargo build --release --bin verifier
 
 
 # Stage 2: Final Image
@@ -18,7 +18,10 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # Copy the compiled binary from the builder stage.
-COPY --from=builder /usr/src/clob/target/release/benchmark-client /usr/local/bin/
+COPY --from=builder /usr/src/clob/target/release/verifier /usr/local/bin/
+
+# Copy the configuration file.
+COPY config.toml .
 
 # Set the entrypoint.
-CMD ["benchmark-client"]
+CMD ["verifier"]

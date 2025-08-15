@@ -50,6 +50,11 @@ impl Settings {
             .set_default("multicast.addr", "239.0.0.1:9000")?
             .set_default("multicast.bind_addr", "0.0.0.0:0")?
             .add_source(config::File::with_name("config").required(false))
+            .add_source(
+                config::Environment::with_prefix("CLOB")
+                    .prefix_separator("_")
+                    .separator("__"),
+            )
             .build()?;
 
         config.try_deserialize()

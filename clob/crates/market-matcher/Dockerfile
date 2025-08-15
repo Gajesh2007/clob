@@ -5,7 +5,7 @@ FROM rust:1-slim-bookworm as builder
 WORKDIR /usr/src/clob
 
 # Copy the entire workspace to ensure all local dependencies are available.
-COPY ../../. .
+COPY . .
 
 # Build only the market-matcher binary in release mode.
 RUN cargo build --release --bin market-matcher
@@ -21,7 +21,7 @@ WORKDIR /app
 COPY --from=builder /usr/src/clob/target/release/market-matcher /usr/local/bin/
 
 # Copy the configuration file.
-COPY ../../config.toml .
+COPY config.toml .
 
 # Set the entrypoint.
-CMD ["market-matcher"]
+ENTRYPOINT ["market-matcher"]
