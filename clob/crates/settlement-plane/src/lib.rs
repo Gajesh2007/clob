@@ -10,7 +10,6 @@ use thiserror::Error;
 use futures_util::StreamExt;
 use matching_engine::MatchingEngine;
 use std::collections::BTreeMap;
-use std::env;
 use dashmap::DashMap;
 use redis::AsyncCommands;
 use tracing::{info, error, debug};

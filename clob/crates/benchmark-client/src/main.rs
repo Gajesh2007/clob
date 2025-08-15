@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("--- Clearing previous state ---");
     let redis_client = redis::Client::open(args.redis_addr.as_str())?;
-    let mut redis_conn = redis_client.get_async_connection().await?;
+    let mut redis_conn = redis_client.get_multiplexed_async_connection().await?;
     let _: () = redis_conn.del("execution_log").await?;
     info!("State cleared.");
 

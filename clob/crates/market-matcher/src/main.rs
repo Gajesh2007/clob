@@ -44,7 +44,7 @@ async fn run_single_market(
     pubsub_conn.subscribe(&channel).await?;
     
     // Create a separate Redis connection for publishing events
-    let mut publisher_conn = redis_client.get_async_connection().await?;
+    let mut publisher_conn = redis_client.get_multiplexed_async_connection().await?;
     let events_channel = format!("market-events:{}", market_id.0);
 
     tracing::info!(market_id = %market_id.0, "Matching engine started for market");
@@ -102,7 +102,10 @@ async fn run_single_market(
                         let maker_account_opt = account_cache.get_mut(&trade.maker_user_id);
                         let taker_account_opt = account_cache.get_mut(&trade.taker_user_id);
 
-                        if let (Some(mut maker_account), Some(mut taker_account)) = (maker_account_opt, taker_account_opt) {
+                        if maker_account_opt.is_some() && taker_account_opt.is_some() {
+                            let mut maker_account = maker_account_opt.unwrap();
+                            let mut taker_account = taker_account_opt.unwrap();
+
                             let asset1 = AssetID(1);
                             let asset2 = AssetID(2);
                             let total_price = trade.price * trade.quantity;
@@ -119,7 +122,7 @@ async fn run_single_market(
                 let event_bytes = bincode::serialize(&event)?;
                 // Publish to both UDP and Redis
                 udp_socket.send(&event_bytes).await?;
-                publisher_conn.publish(events_channel.as_str(), &event_bytes).await?;
+                let _: () = publisher_conn.publish(events_channel.as_str(), &event_bytes).await?;
             }
         }
     }

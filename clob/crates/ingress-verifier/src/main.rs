@@ -1,13 +1,12 @@
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use common_types::{SignedOrder, UserID, Deposit, Transaction, AssetID};
 use configuration::Settings;
 use ed25519_dalek::{Verifier, VerifyingKey, SigningKey};
 use dashmap::DashMap;
 use thiserror::Error;
-use redis::AsyncCommands;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use warp::Filter;
@@ -69,7 +68,7 @@ async fn handle_connection(
         redis::pipe()
             .publish(&channel, payload.clone())
             .rpush("execution_log", payload)
-            .query_async(&mut redis_conn)
+            .query_async::<_, ()>(&mut redis_conn)
             .await?;
     }
     
@@ -113,7 +112,7 @@ async fn run_http_server(
             redis::pipe()
                 .publish("deposits", payload.clone())
                 .rpush("execution_log", payload)
-                .query_async(&mut client)
+                .query_async::<_, ()>(&mut client)
                 .await
                 .map_err(|_| warp::reject())?;
 

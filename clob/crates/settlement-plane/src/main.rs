@@ -1,4 +1,4 @@
-use settlement_plane::{run_settlement_plane, SettlementPlaneError};
+use settlement_plane::run_settlement_plane;
 use std::error::Error;
 use configuration::Settings;
 use tokio::signal;
