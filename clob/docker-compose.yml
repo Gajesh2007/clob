@@ -18,10 +18,7 @@ services:
     restart: always
     build:
       context: .
-      dockerfile: Dockerfile
-      # Pass the binary name to our universal Dockerfile
-      args:
-        BINARY_NAME: ingress-verifier
+      dockerfile: crates/ingress-verifier/Dockerfile
     container_name: nasdaq-ingress-verifier
     ports:
       - "8080:8080" # TCP for orders
@@ -39,9 +36,7 @@ services:
     restart: always
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        BINARY_NAME: market-matcher
+      dockerfile: crates/market-matcher/Dockerfile
     container_name: nasdaq-market-matcher
     depends_on:
       - redis
@@ -56,9 +51,7 @@ services:
   benchmark-client:
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        BINARY_NAME: benchmark-client
+      dockerfile: crates/benchmark-client/Dockerfile
     container_name: nasdaq-benchmark-client
     depends_on:
       - ingress-verifier
