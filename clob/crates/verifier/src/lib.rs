@@ -49,8 +49,8 @@ struct L1Checkpoint {
 /// Run the verifier and return whether the local state root matches the official checkpoint.
 pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
     // Try Redis first for the latest checkpoint, fall back to file if missing
-    info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
-    let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
+    info!(redis_addr = %settings.redis_log_addr, "Connecting to Redis (log)");
+    let redis_client = redis::Client::open(settings.redis_log_addr.as_str())?;
         let mut redis_conn = redis_client.get_multiplexed_async_connection().await?;
     // Prefer the latest checkpoint published to Redis; fall back to file
     let checkpoint_json: Option<String> = redis::cmd("GET").arg("checkpoint:latest").query_async(&mut redis_conn).await?;

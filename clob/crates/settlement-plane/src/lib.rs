@@ -133,8 +133,8 @@ async fn submit_checkpoint_to_l1(file_path: &str, state_root: [u8; 32], da_certi
 pub async fn run_settlement_plane(settings: Settings) -> Result<(), SettlementPlaneError> {
     info!("Running settlement plane");
     let http_client = Client::new();
-    info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
-    let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
+    info!(redis_addr = %settings.redis_log_addr, "Connecting to Redis (log)");
+    let redis_client = redis::Client::open(settings.redis_log_addr.as_str())?;
     let mut transaction_batch = Vec::new();
     let mut batch_count: u64 = 0;
     let mut checkpoint_timer = tokio::time::interval(tokio::time::Duration::from_secs(settings.settlement_plane.checkpoint_interval_seconds));

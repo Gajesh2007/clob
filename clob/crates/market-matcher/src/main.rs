@@ -240,8 +240,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let settings = Settings::load()?;
     
-    tracing::info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
-    let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
+    tracing::info!(redis_addr = %settings.redis_pubsub_addr, "Connecting to Redis (pubsub)");
+    let redis_client = redis::Client::open(settings.redis_pubsub_addr.as_str())?;
     let account_cache: AccountCache = Arc::new(DashMap::new());
     let user_locks: UserLockMap = Arc::new(DashMap::new());
     let reserved: ReservedMap = Arc::new(DashMap::new());

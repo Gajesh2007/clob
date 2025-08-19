@@ -173,8 +173,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let settings = Settings::load()?;
     let public_key_cache: PublicKeyCache = Arc::new(DashMap::new());
     
-    info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
-    let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
+    info!(redis_addr = %settings.redis_pubsub_addr, "Connecting to Redis (pubsub/log combined for now)");
+    let redis_client = redis::Client::open(settings.redis_pubsub_addr.as_str())?;
     let redis_conn = ConnectionManager::new(redis_client).await?;
 
     let http_addr = settings.execution_plane.http_listen_addr.parse()?;

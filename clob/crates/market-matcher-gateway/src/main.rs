@@ -32,7 +32,7 @@ async fn main() {
 
     let settings = Settings::load().expect("failed to load settings");
     let addr: SocketAddr = settings.gateway.http_listen_addr.parse().expect("invalid gateway addr");
-    let redis_client = redis::Client::open(settings.redis_addr.as_str()).expect("invalid redis addr");
+    let redis_client = redis::Client::open(settings.redis_pubsub_addr.as_str()).expect("invalid redis addr");
 
     // Fan-out hub: each market gets a broadcast channel of encoded MarketEvent frames
     // Channel size keeps a short buffer to avoid memory growth; slow clients will drop

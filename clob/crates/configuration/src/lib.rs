@@ -10,7 +10,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, Clone)]
 /// Top-level settings consumed by services.
 pub struct Settings {
-    pub redis_addr: String,
+    pub redis_pubsub_addr: String,
+    pub redis_log_addr: String,
     pub execution_plane: ExecutionPlane,
     pub settlement_plane: SettlementPlane,
     pub verifier: Verifier,
@@ -50,7 +51,8 @@ impl Settings {
     /// Load settings from defaults, `config.toml` (optional), and environment.
     pub fn load() -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
-            .set_default("redis_addr", "redis://10.10.0.2:6379/")?
+            .set_default("redis_pubsub_addr", "redis://10.10.0.2:6379/")?
+            .set_default("redis_log_addr", "redis://10.10.0.2:6380/")?
             .set_default("execution_plane.tcp_listen_addr", "0.0.0.0:8080")?
             .set_default("execution_plane.http_listen_addr", "0.0.0.0:9090")?
             .set_default("execution_plane.execution_log_path", "execution.log")?
