@@ -26,6 +26,7 @@ use warp::Filter;
 use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
 use tracing::{info, instrument};
+use redis::aio::ConnectionManager;
 
 #[derive(Error, Debug)]
 pub enum IngressError {
@@ -51,7 +52,7 @@ type PublicKeyCache = Arc<DashMap<UserID, VerifyingKey>>;
 async fn handle_connection(
     mut stream: TcpStream,
     public_key_cache: PublicKeyCache,
-    mut redis_conn: redis::aio::MultiplexedConnection,
+    mut redis_conn: ConnectionManager,
 ) -> Result<(), IngressError> {
     loop {
         // Length-prefixed framing: each frame starts with a 4-byte u32 length
@@ -89,11 +90,25 @@ async fn handle_connection(
         let payload = bincode::serialize(&tx)?;
         
         info!(order_id = %order.order_id.0, channel = %channel, "Publishing order to Redis");
-        redis::pipe()
-            .publish(&channel, payload.clone())
-            .rpush("execution_log", payload)
-            .query_async::<_, ()>(&mut redis_conn)
-            .await?;
+        let mut attempt: u8 = 0;
+        loop {
+            let result = redis::pipe()
+                .publish(&channel, payload.clone())
+                .rpush("execution_log", payload.clone())
+                .query_async::<_, ()>(&mut redis_conn)
+                .await;
+            match result {
+                Ok(_) => break,
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= 2 {
+                        return Err(IngressError::from(e));
+                    }
+                    tracing::warn!(error = %e, "Redis pipeline failed; retrying once");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
     }
     
     Ok(())
@@ -108,7 +123,7 @@ struct DepositRequest { user_id: UserID, asset_id: AssetID, amount: Decimal }
 
 async fn run_http_server(
     public_key_cache: PublicKeyCache,
-    redis_conn: redis::aio::MultiplexedConnection,
+    redis_conn: ConnectionManager,
     addr: std::net::SocketAddr,
 ) {
     let create_user_route = warp::post()
@@ -131,7 +146,7 @@ async fn run_http_server(
         .and(warp::path("deposit"))
         .and(warp::any().map(move || redis_conn_clone.clone()))
         .and(warp::body::json())
-        .and_then(|mut client: redis::aio::MultiplexedConnection, req: DepositRequest| async move {
+        .and_then(|mut client: ConnectionManager, req: DepositRequest| async move {
             // Convert request into a Transaction::Deposit and both publish to
             // the broadcast channel and append to the durable execution log.
             let deposit = Deposit { user_id: req.user_id, asset_id: req.asset_id, amount: req.amount };
@@ -160,7 +175,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
     let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
-    let redis_conn = redis_client.get_multiplexed_async_connection().await?;
+    let redis_conn = ConnectionManager::new(redis_client).await?;
 
     let http_addr = settings.execution_plane.http_listen_addr.parse()?;
     // Spawn the HTTP server for user creation and deposits
