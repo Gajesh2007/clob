@@ -48,7 +48,7 @@ fn get_user_lock(locks: &UserLockMap, user_id: UserID) -> Arc<AsyncMutex<()>> {
 
 async fn run_single_market(
     market_id: MarketID,
-    settings: Settings,
+    _settings: Settings,
     redis_client: redis::Client,
     account_cache: AccountCache,
     user_locks: UserLockMap,
@@ -198,6 +198,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tracing::info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
     let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
     let account_cache: AccountCache = Arc::new(DashMap::new());
+    let user_locks: UserLockMap = Arc::new(DashMap::new());
 
     let acc_cache_clone = account_cache.clone();
     let user_locks_clone = user_locks.clone();
@@ -249,6 +250,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             settings.clone(),
             redis_client.clone(),
             account_cache.clone(),
+            user_locks.clone(),
         ));
         handles.push(handle);
     }
