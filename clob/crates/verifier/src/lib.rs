@@ -1,3 +1,11 @@
+//! Independent verifier library.
+//!
+//! Responsibilities
+//! - Fetches the latest checkpoint from Redis (`checkpoint:latest`) or file
+//! - Optionally validates DA availability via EigenDA proxy
+//! - Replays the `execution_log` from Redis and reconstructs state
+//! - Computes a Merkle root and compares to the official checkpoint
+//!
 use std::collections::BTreeMap;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -38,11 +46,13 @@ struct L1Checkpoint {
     da_certificate: Option<String>,
 }
 
+/// Run the verifier and return whether the local state root matches the official checkpoint.
 pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
     // Try Redis first for the latest checkpoint, fall back to file if missing
     info!(redis_addr = %settings.redis_addr, "Connecting to Redis");
     let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
         let mut redis_conn = redis_client.get_multiplexed_async_connection().await?;
+    // Prefer the latest checkpoint published to Redis; fall back to file
     let checkpoint_json: Option<String> = redis::cmd("GET").arg("checkpoint:latest").query_async(&mut redis_conn).await?;
     let official_checkpoint: L1Checkpoint = if let Some(json) = checkpoint_json {
         serde_json::from_str(&json)?
@@ -78,6 +88,7 @@ pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
     // The verifier now needs to fetch the log from the DA layer.
     // For this simulation, we assume the DA layer is Redis itself,
     // and we can read the log by fetching all messages from a list.
+    // Read the full execution log to replay state deterministically
     let log_entries: Vec<Vec<u8>> = redis_conn.lrange("execution_log", 0, -1).await?;
 
     let mut local_order_book = OrderBook::new();
@@ -99,6 +110,7 @@ pub async fn run_verifier(settings: Settings) -> Result<bool, VerifierError> {
                 if !local_account_cache.contains_key(&order.user_id) {
                     return Err(VerifierError::UnknownUser(order.user_id));
                 }
+                // Re-run matching locally to update balances
                 let events = local_order_book.process_order(order);
                 for event in &events {
                     if let common_types::MarketEvent::OrderTraded(trade) = event {

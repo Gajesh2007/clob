@@ -1,11 +1,28 @@
+//! Matching engine library.
+//!
+//! This crate implements price-time priority matching for limit orders over the
+//! shared [`common_types::OrderBook`] structure. It is intentionally minimal and
+//! free of networking or persistence concerns.
+//!
+//! Key properties
+//! - Deterministic: given the same input sequence, produces the same events
+//! - Price-time priority: best price first; FIFO within each price level
+//! - Emits [`common_types::MarketEvent`]s for placements and trades
+//!
 use common_types::{MarketEvent, Order, Side, Trade, TradeID, OrderBook, PriceLevel};
 use rust_decimal::Decimal;
 
+/// Core trait for processing orders against an order book.
+///
+/// Implementations must consume an input [`Order`] and return the sequence of
+/// [`MarketEvent`]s generated (zero or more trades, and possibly an order
+/// placement if residual quantity remains).
 pub trait MatchingEngine {
     fn process_order(&mut self, order: Order) -> Vec<MarketEvent>;
 }
 
 impl MatchingEngine for OrderBook {
+    /// Match and place a single order against the order book.
     fn process_order(&mut self, mut order: Order) -> Vec<MarketEvent> {
         let mut events = Vec::new();
 

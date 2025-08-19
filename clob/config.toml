@@ -15,5 +15,4 @@
 # checkpoint_file_path = "checkpoint.json"
 # execution_log_path = "execution.log"
 
-[multicast]
-# addr = "239.0.0.1:9000"
+## Multicast removed; real-time fan-out via Redis Pub/Sub

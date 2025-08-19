@@ -1,3 +1,16 @@
+//! Ingress and signature verification service.
+//!
+//! Responsibilities
+//! - Accepts client connections over TCP (`execution_plane.tcp_listen_addr`)
+//!   using length-prefixed bincode frames carrying [`common_types::SignedOrder`]
+//! - Verifies ED25519 signatures against the per-user public key cache
+//! - Publishes validated orders to Redis channel `market:{id}` and appends all
+//!   transactions (orders and deposits) to `execution_log`
+//! - Exposes HTTP endpoints (`execution_plane.http_listen_addr`) for user
+//!   creation and deposits:
+//!   - `POST /users` → returns a new [`common_types::UserID`] and private key
+//!   - `POST /deposit` → publishes to `deposits` and appends to `execution_log`
+//!
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -31,13 +44,19 @@ pub enum IngressError {
 type PublicKeyCache = Arc<DashMap<UserID, VerifyingKey>>;
 
 #[instrument(skip_all, fields(peer_addr = %stream.peer_addr().unwrap()))]
+/// Handle a single TCP connection using length-prefixed framing.
+///
+/// Each frame contains a bincode-serialized [`SignedOrder`]. Valid orders are
+/// published to `market:{id}` and appended to the `execution_log` list.
 async fn handle_connection(
     mut stream: TcpStream,
     public_key_cache: PublicKeyCache,
     mut redis_conn: redis::aio::MultiplexedConnection,
 ) -> Result<(), IngressError> {
     loop {
-        // Use length-prefix framing to read multiple orders from one connection
+        // Length-prefixed framing: each frame starts with a 4-byte u32 length
+        // followed by a bincode-serialized SignedOrder payload. This allows
+        // multiple orders to be sent on one persistent TCP connection.
         let len = match stream.read_u32().await {
             Ok(len) => len,
             // A "closed" error means the client gracefully disconnected.
@@ -48,10 +67,12 @@ async fn handle_connection(
         let mut buffer = vec![0; len as usize];
         stream.read_exact(&mut buffer).await?;
 
+        // Deserialize the SignedOrder from the frame body
         let signed_order: SignedOrder = bincode::deserialize(&buffer)?;
         let order = signed_order.order;
         info!(order_id = %order.order_id.0, user_id = %order.user_id, "Received order");
 
+        // Look up the user's public key and verify the ED25519 signature
         let public_key = public_key_cache.get(&order.user_id).ok_or(IngressError::PublicKeyNotFound(order.user_id))?;
         let message_bytes = bincode::serialize(&order)?;
         
@@ -60,6 +81,9 @@ async fn handle_connection(
             e
         })?;
         
+        // Publish the validated order to the market-specific channel and
+        // append the transaction to the durable execution log in a single
+        // Redis round-trip using a pipeline.
         let channel = format!("market:{}", order.market_id.0);
         let tx = Transaction::SignedOrder(signed_order);
         let payload = bincode::serialize(&tx)?;
@@ -76,8 +100,10 @@ async fn handle_connection(
 }
 
 #[derive(Serialize)]
+/// Response payload for `POST /users`.
 struct CreateUserResponse { user_id: UserID, private_key_hex: String }
 #[derive(Deserialize)]
+/// Request payload for `POST /deposit`.
 struct DepositRequest { user_id: UserID, asset_id: AssetID, amount: Decimal }
 
 async fn run_http_server(
@@ -89,6 +115,7 @@ async fn run_http_server(
         .and(warp::path("users"))
         .and(warp::any().map(move || public_key_cache.clone()))
         .map(|pks: PublicKeyCache| {
+            // Generate a fresh ED25519 keypair and register the verifying key
             let mut csprng = OsRng;
             let mut secret_bytes = [0u8; 32];
             csprng.fill_bytes(&mut secret_bytes);
@@ -105,6 +132,8 @@ async fn run_http_server(
         .and(warp::any().map(move || redis_conn_clone.clone()))
         .and(warp::body::json())
         .and_then(|mut client: redis::aio::MultiplexedConnection, req: DepositRequest| async move {
+            // Convert request into a Transaction::Deposit and both publish to
+            // the broadcast channel and append to the durable execution log.
             let deposit = Deposit { user_id: req.user_id, asset_id: req.asset_id, amount: req.amount };
             let tx = Transaction::Deposit(deposit);
             let payload = bincode::serialize(&tx).unwrap();
@@ -123,6 +152,7 @@ async fn run_http_server(
 }
 
 #[tokio::main]
+/// Service entrypoint: starts HTTP server and TCP listener.
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
     let settings = Settings::load()?;
@@ -133,12 +163,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let redis_conn = redis_client.get_multiplexed_async_connection().await?;
 
     let http_addr = settings.execution_plane.http_listen_addr.parse()?;
+    // Spawn the HTTP server for user creation and deposits
     tokio::spawn(run_http_server(public_key_cache.clone(), redis_conn.clone(), http_addr));
 
-    let listener = TcpListener::bind(&settings.execution_plane.tcp_listen_addr).await?;
+    // Bind TCP listener with exponential backoff in case the port is temporarily unavailable
+    let listener = loop {
+        match TcpListener::bind(&settings.execution_plane.tcp_listen_addr).await {
+            Ok(l) => break l,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to bind TCP listener; retrying in 500ms");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    };
     info!("Ingress-Verifier listening on {}", &settings.execution_plane.tcp_listen_addr);
 
     loop {
+        // Accept inbound TCP connections and handle each on a dedicated task
         let (socket, _) = listener.accept().await?;
         let pk_clone = public_key_cache.clone();
         let redis_clone = redis_conn.clone();

@@ -1,6 +1,14 @@
+//! Market matcher service.
+//!
+//! Responsibilities
+//! - Subscribes to Redis `market:{id}` channels and processes incoming orders
+//! - Maintains an in-memory [`common_types::OrderBook`] per market
+//! - Emits `MarketEvent::OrderTraded` and `OrderPlaced` events
+//! - Publishes events to Redis channel `market-events:{id}` for real-time consumers
+//! - Listens for `deposits` to maintain a local account cache for prelim checks
+//!
 use std::error::Error;
 use std::sync::Arc;
-use tokio::net::UdpSocket;
 use common_types::{MarketID, OrderBook, MarketEvent, Account, UserID, AssetID, Transaction};
 use matching_engine::MatchingEngine;
 use configuration::Settings;
@@ -11,6 +19,7 @@ use futures_util::StreamExt;
 use redis::AsyncCommands;
 use tracing::{self, Level};
 use tracing_subscriber::FmtSubscriber;
+use tokio::time::{sleep, Duration};
 
 #[derive(Error, Debug)]
 pub enum MatcherError {
@@ -35,22 +44,34 @@ async fn run_single_market(
     account_cache: AccountCache,
 ) -> Result<(), MatcherError> {
     let mut order_book = OrderBook::new();
-    let multicast_addr: std::net::SocketAddr = settings.multicast.addr.parse().unwrap();
-    let udp_socket = UdpSocket::bind(&settings.multicast.bind_addr).await?;
-    udp_socket.connect(multicast_addr).await?;
 
-    let mut pubsub_conn = redis_client.get_async_connection().await?.into_pubsub();
-    let channel = format!("market:{}", market_id.0);
-    pubsub_conn.subscribe(&channel).await?;
-    
     // Create a separate Redis connection for publishing events
     let mut publisher_conn = redis_client.get_multiplexed_async_connection().await?;
     let events_channel = format!("market-events:{}", market_id.0);
 
     tracing::info!(market_id = %market_id.0, "Matching engine started for market");
+    
+    // Robust PubSub loop with auto-reconnect
+    let channel = format!("market:{}", market_id.0);
+    loop {
+        let mut pubsub_conn = match redis_client.get_async_connection().await {
+            Ok(conn) => conn.into_pubsub(),
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to get Redis connection for PubSub; retrying");
+                sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        if let Err(e) = pubsub_conn.subscribe(&channel).await {
+            tracing::error!(error = %e, channel = %channel, "Failed to subscribe to market channel; retrying");
+            sleep(Duration::from_millis(500)).await;
+            continue;
+        }
 
-    let mut stream = pubsub_conn.on_message();
-    while let Some(msg) = stream.next().await {
+        tracing::info!(channel = %channel, "Subscribed to market channel");
+        let mut stream = pubsub_conn.on_message();
+        while let Some(msg) = stream.next().await {
+        // Deserialize orders from Redis Pub/Sub and process through the engine
         if let Ok(Transaction::SignedOrder(signed_order)) = bincode::deserialize(msg.get_payload_bytes()) {
             let order = signed_order.order;
             tracing::info!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, "Received order from Redis");
@@ -58,6 +79,8 @@ async fn run_single_market(
             let user_account = match account_cache.get(&order.user_id) {
                 Some(acc) => acc,
                 None => {
+                    // Soft reject if account is not present; deposit events should
+                    // warm the cache before orders arrive.
                     tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, "Order rejected: User account not found in cache.");
                     continue;
                 }
@@ -68,6 +91,7 @@ async fn run_single_market(
             
             let balance = user_account.balances.get(&required_asset).copied().unwrap_or_default();
             if balance < required_amount {
+                // Guard against obvious insufficient funds based on cached balance
                 tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, asset_id = required_asset.0, required_amount = %required_amount, balance = %balance, "Order rejected: Insufficient funds");
                 continue;
             }
@@ -80,9 +104,9 @@ async fn run_single_market(
 
                     if trade.maker_user_id == trade.taker_user_id {
                         if let Some(mut account) = account_cache.get_mut(&trade.maker_user_id) {
-                            // Self-trade: update the single account.
-                            // The net effect on balances is zero, but we perform the operations
-                            // to maintain logical consistency with the generated trade event.
+                            // Self-trade: update the single account. The net effect
+                            // on balances is zero, but we apply both sides to maintain
+                            // logical consistency with the generated trade event.
                             let asset1 = AssetID(1);
                             let asset2 = AssetID(2);
                             let total_price = trade.price * trade.quantity;
@@ -120,11 +144,36 @@ async fn run_single_market(
                     }
                 }
                 let event_bytes = bincode::serialize(&event)?;
-                // Publish to both UDP and Redis
-                udp_socket.send(&event_bytes).await?;
-                let _: () = publisher_conn.publish(events_channel.as_str(), &event_bytes).await?;
+                // Publish to Redis with one reconnect-and-retry on failure
+                if let Err(e) = redis::cmd("PUBLISH")
+                    .arg(events_channel.as_str())
+                    .arg(&event_bytes)
+                    .query_async::<_, ()>(&mut publisher_conn)
+                    .await
+                {
+                    tracing::error!(error = %e, "Redis publish failed; attempting to reconnect publisher and retry");
+                    match redis_client.get_multiplexed_async_connection().await {
+                        Ok(conn) => {
+                            publisher_conn = conn;
+                            if let Err(e2) = redis::cmd("PUBLISH")
+                                .arg(events_channel.as_str())
+                                .arg(&event_bytes)
+                                .query_async::<_, ()>(&mut publisher_conn)
+                                .await
+                            {
+                                tracing::error!(error = %e2, "Redis publish retry failed; dropping event");
+                            }
+                        }
+                        Err(e2) => {
+                            tracing::error!(error = %e2, "Failed to re-establish publisher connection; dropping event");
+                        }
+                    }
+                }
             }
         }
+        }
+        tracing::warn!(channel = %channel, "PubSub stream ended; attempting to reconnect");
+        sleep(Duration::from_millis(500)).await;
     }
     Ok(())
 }
@@ -146,19 +195,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let acc_cache_clone = account_cache.clone();
     let redis_client_clone = redis_client.clone();
     tokio::spawn(async move {
-        let mut pubsub = redis_client_clone.get_async_connection().await.unwrap().into_pubsub();
-        pubsub.subscribe("deposits").await.unwrap();
-        let mut deposit_stream = pubsub.on_message();
-        while let Some(msg) = deposit_stream.next().await {
-            if let Ok(Transaction::Deposit(deposit)) = bincode::deserialize(msg.get_payload_bytes()) {
-                acc_cache_clone.entry(deposit.user_id).or_insert_with(|| Account {
-                    user_id: deposit.user_id,
-                    balances: BTreeMap::new(),
-                });
-                let mut account = acc_cache_clone.get_mut(&deposit.user_id).unwrap();
-                *account.balances.entry(deposit.asset_id).or_default() += deposit.amount;
-                tracing::info!(user_id = %deposit.user_id, "Processed deposit");
+        // Maintain local account cache by consuming deposit broadcasts with auto-reconnect
+        loop {
+            let mut pubsub = match redis_client_clone.get_async_connection().await {
+                Ok(conn) => conn.into_pubsub(),
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to get Redis connection for deposits PubSub; retrying");
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
+            if let Err(e) = pubsub.subscribe("deposits").await {
+                tracing::error!(error = %e, "Failed to subscribe to deposits; retrying");
+                sleep(Duration::from_millis(500)).await;
+                continue;
             }
+            let mut deposit_stream = pubsub.on_message();
+            while let Some(msg) = deposit_stream.next().await {
+                if let Ok(Transaction::Deposit(deposit)) = bincode::deserialize(msg.get_payload_bytes()) {
+                    acc_cache_clone.entry(deposit.user_id).or_insert_with(|| Account {
+                        user_id: deposit.user_id,
+                        balances: BTreeMap::new(),
+                    });
+                    let mut account = acc_cache_clone.get_mut(&deposit.user_id).unwrap();
+                    *account.balances.entry(deposit.asset_id).or_default() += deposit.amount;
+                    tracing::info!(user_id = %deposit.user_id, "Processed deposit");
+                }
+            }
+            tracing::warn!("Deposits PubSub stream ended; attempting to reconnect");
+            sleep(Duration::from_millis(500)).await;
         }
     });
 

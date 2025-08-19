@@ -1,3 +1,11 @@
+//! Benchmark client and load generator.
+//!
+//! Responsibilities
+//! - Creates synthetic users via HTTP (`/users`) and funds them via `/deposit`
+//! - Opens TCP connections to the ingress (`tcp_addr`) and streams signed orders
+//! - Subscribes to `market-events:{id}` on Redis to measure end-to-end latency
+//! - Prints throughput and latency percentiles at the end of the run
+//!
 use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -21,9 +29,11 @@ use tracing::{info, error};
 use dashmap::DashMap;
 use hdrhistogram::Histogram;
 use tokio::sync::Mutex;
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
+/// Command-line arguments for configuring the benchmark run.
 struct Args {
     #[arg(long, default_value_t = String::from("127.0.0.1:9090"))]
     http_addr: String,
@@ -37,6 +47,10 @@ struct Args {
     num_traders: u32,
     #[arg(long, default_value_t = 30)]
     duration_secs: u64,
+    #[arg(long, default_value_t = String::from(""))]
+    gateway_addr: String,
+    #[arg(long, value_parser = ["redis", "gateway_ws"], default_value_t = String::from("redis"))]
+    event_source: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -57,6 +71,7 @@ async fn create_and_fund_user(
     http_addr: &str,
     assets: &[(u32, Decimal)],
 ) -> Result<(UserID, SigningKey), Box<dyn Error>> {
+    // Create a new user and receive a private key for signing orders
     let create_user_url = format!("http://{}/users", http_addr);
     let resp = http_client.post(&create_user_url).send().await?.json::<CreateUserResponse>().await?;
     let user_id = resp.user_id;
@@ -65,6 +80,7 @@ async fn create_and_fund_user(
     info!(user_id = %user_id, "Created user");
 
     for (asset_id, amount) in assets {
+        // Seed the account with balances to enable trading
         let deposit_url = format!("http://{}/deposit", http_addr);
         let deposit_req = DepositRequest { user_id, asset_id: AssetID(*asset_id), amount: *amount };
     http_client.post(&deposit_url).json(&deposit_req).send().await?.error_for_status()?;
@@ -74,6 +90,7 @@ async fn create_and_fund_user(
     Ok((user_id, signing_key))
 }
 
+/// Send a single signed order over the length-prefixed TCP protocol.
 async fn send_order(stream: &mut TcpStream, signed_order: &SignedOrder) -> Result<(), Box<dyn Error + Send + Sync>> {
     let payload = bincode::serialize(signed_order)?;
     let len = payload.len() as u32;
@@ -89,6 +106,7 @@ struct Trader {
 }
 
 #[tokio::main]
+/// Entry point: sets up users, generates orders, and reports metrics.
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
@@ -126,29 +144,87 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let trade_count_clone = trade_count.clone();
     let pending_orders_clone = pending_orders.clone();
     let latency_hist_clone = latency_histogram.clone();
-    let events_channel = format!("market-events:{}", market_id);
-    let mut pubsub_conn = redis_client.get_async_connection().await?.into_pubsub();
-    pubsub_conn.subscribe(events_channel).await?;
-    
-    tokio::spawn(async move {
-        let mut message_stream = pubsub_conn.on_message();
-        info!("Trade counter and latency recorder started on Redis.");
-        while let Ok(Some(msg)) = time::timeout(test_duration + Duration::from_secs(5), message_stream.next()).await {
-            let payload: Vec<u8> = msg.get_payload().unwrap();
-            if let Ok(MarketEvent::OrderTraded(trade)) = bincode::deserialize(&payload) {
-                trade_count_clone.fetch_add(1, Ordering::SeqCst);
-                if let Some((_, start_time)) = pending_orders_clone.remove(&trade.maker_order_id) {
-                    let latency = start_time.elapsed().as_micros() as u64;
-                    latency_hist_clone.lock().await.record(latency).unwrap();
+    match args.event_source.as_str() {
+        "redis" => {
+            let events_channel = format!("market-events:{}", market_id);
+            // Robust subscription with simple retry loop
+            let mut pubsub_conn = loop {
+                match redis_client.get_async_connection().await {
+                    Ok(c) => {
+                        let mut ps = c.into_pubsub();
+                        if let Err(e) = ps.subscribe(events_channel.clone()).await {
+                            tracing::error!(error = %e, "Failed to subscribe to events; retrying");
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            continue;
+                        }
+                        break ps;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to get Redis connection; retrying");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                 }
-                if let Some((_, start_time)) = pending_orders_clone.remove(&trade.taker_order_id) {
-                    let latency = start_time.elapsed().as_micros() as u64;
-                    latency_hist_clone.lock().await.record(latency).unwrap();
+            };
+            tokio::spawn(async move {
+                let mut message_stream = pubsub_conn.on_message();
+                info!("Trade counter and latency recorder started on Redis.");
+                while let Ok(Some(msg)) = time::timeout(test_duration + Duration::from_secs(5), message_stream.next()).await {
+                    let payload: Vec<u8> = msg.get_payload().unwrap();
+                    if let Ok(MarketEvent::OrderTraded(trade)) = bincode::deserialize(&payload) {
+                        trade_count_clone.fetch_add(1, Ordering::SeqCst);
+                        if let Some((_, start_time)) = pending_orders_clone.remove(&trade.maker_order_id) {
+                            let latency = start_time.elapsed().as_micros() as u64;
+                            latency_hist_clone.lock().await.record(latency).unwrap();
+                        }
+                        if let Some((_, start_time)) = pending_orders_clone.remove(&trade.taker_order_id) {
+                            let latency = start_time.elapsed().as_micros() as u64;
+                            latency_hist_clone.lock().await.record(latency).unwrap();
+                        }
+                    }
                 }
-            }
+                info!("Trade counter finished.");
+            });
         }
-        info!("Trade counter finished.");
-    });
+        "gateway_ws" => {
+            use tokio_tungstenite::tungstenite::Message;
+            let base = if args.gateway_addr.is_empty() { "127.0.0.1:9100" } else { &args.gateway_addr };
+            let url = Url::parse(&format!("ws://{}/ws?market_id={}&format=binary", base, market_id)).unwrap();
+            tokio::spawn(async move {
+                let (ws_stream, _) = match tokio_tungstenite::connect_async(url).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        error!("Gateway WS connect error: {}", e);
+                        return;
+                    }
+                };
+                let (_, mut read) = ws_stream.split();
+                info!("Trade counter and latency recorder started via gateway WS.");
+                while let Ok(Some(msg)) = time::timeout(test_duration + Duration::from_secs(5), read.next()).await {
+                    match msg {
+                        Ok(Message::Binary(payload)) => {
+                            if let Ok(MarketEvent::OrderTraded(trade)) = bincode::deserialize(&payload) {
+                                trade_count_clone.fetch_add(1, Ordering::SeqCst);
+                                if let Some((_, start_time)) = pending_orders_clone.remove(&trade.maker_order_id) {
+                                    let latency = start_time.elapsed().as_micros() as u64;
+                                    latency_hist_clone.lock().await.record(latency).unwrap();
+                                }
+                                if let Some((_, start_time)) = pending_orders_clone.remove(&trade.taker_order_id) {
+                                    let latency = start_time.elapsed().as_micros() as u64;
+                                    latency_hist_clone.lock().await.record(latency).unwrap();
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+                info!("Trade counter finished.");
+            });
+        }
+        other => {
+            panic!("unsupported event_source: {}", other);
+        }
+    }
 
     info!("--- Starting benchmark for {} seconds ---", args.duration_secs);
     let start_time = Instant::now();
@@ -184,6 +260,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     order_type: OrderType::Limit,
                     timestamp: 0,
                 };
+                // Sign and send the order over the TCP length-prefixed protocol
                 let message_bytes = bincode::serialize(&order).unwrap();
                 let signature = trader.signing_key.sign(&message_bytes);
                 let signed_order = SignedOrder { order, signature: Signature(signature) };

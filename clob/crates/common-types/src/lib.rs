@@ -1,16 +1,37 @@
+//! Core shared types used across the CLOB system.
+//!
+//! This crate defines the canonical data model for requests, events, and
+//! state that flow between services:
+//! - Orders and signed orders submitted by clients
+//! - Deposits and the unified [`Transaction`] log
+//! - Trades and [`MarketEvent`]s emitted by the matching engine
+//! - [`Account`] state and the [`OrderBook`] snapshot used for checkpointing
+//!
+//! All numeric quantities (prices and amounts) use [`rust_decimal::Decimal`]
+//! for exact decimal arithmetic suitable for financial applications.
+//!
+//! Conventions
+//! - Price represents quote per one unit of base for a market
+//! - Quantity represents base-asset units
+//! - Asset identifiers are opaque and application-defined
+//!
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 // --- Financial Primitives ---
+/// Price in quote currency per one unit of base currency.
 pub type Price = Decimal;
+/// Quantity in base-asset units.
 pub type Quantity = Decimal;
 
 // --- Identifiers ---
+/// Unique identifier for an order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct OrderID(pub u64);
 
+/// Unique identifier for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct UserID(pub u64);
 
@@ -23,9 +44,11 @@ impl fmt::Display for UserID {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct TradeID(pub u64);
 
+/// Opaque identifier for an asset (application-defined).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct AssetID(pub u32);
 
+/// Identifier for a market (e.g., a base/quote pair).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct MarketID(pub u32);
 
@@ -34,9 +57,11 @@ use ed25519_dalek as ed25519;
 
 pub type Hash = [u8; 32];
 
+/// ED25519 verifying key associated with a [`UserID`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicKey(pub ed25519::VerifyingKey);
 
+/// ED25519 signature over a bincode-serialized [`Order`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature(pub ed25519::Signature);
 
@@ -53,12 +78,17 @@ pub enum OrderType {
     Limit,
 }
 
+/// Account state tracked by the system.
+///
+/// Balances are held per [`AssetID`]. The settlement plane and verifier
+/// reconstruct these from the execution log deterministically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub user_id: UserID,
     pub balances: BTreeMap<AssetID, Quantity>,
 }
 
+/// Client order describing intent to buy or sell a quantity at a price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Order {
     pub order_id: OrderID,
@@ -71,12 +101,14 @@ pub struct Order {
     pub timestamp: u64,
 }
 
+/// An [`Order`] bundled with an ED25519 [`Signature`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedOrder {
     pub order: Order,
     pub signature: Signature,
 }
 
+/// Deposit of an amount for a given asset into a user's account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deposit {
     pub user_id: UserID,
@@ -84,12 +116,14 @@ pub struct Deposit {
     pub amount: Quantity,
 }
 
+/// All transactions recorded in the execution log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transaction {
     SignedOrder(SignedOrder),
     Deposit(Deposit),
 }
 
+/// Executed trade resulting from matching maker and taker orders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Trade {
     pub trade_id: TradeID,
@@ -103,6 +137,11 @@ pub struct Trade {
     pub timestamp: u64,
 }
 
+/// Events emitted by the matching engine.
+///
+/// - `OrderPlaced` is emitted when a residual order is added to the book.
+/// - `OrderTraded` is emitted for each trade execution.
+/// - `OrderCancelled` is reserved for future use and not currently emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MarketEvent {
     OrderPlaced {
@@ -123,6 +162,7 @@ pub enum MarketEvent {
 
 // --- State Snapshot ---
 
+/// Canonical snapshot of system state used for checkpointing and verification.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StateSnapshot {
     pub accounts: Vec<(UserID, Account)>,
@@ -133,6 +173,10 @@ pub struct StateSnapshot {
 
 pub type PriceLevel = VecDeque<Order>;
 
+/// In-memory order book structure used by the matching engine.
+///
+/// Bids are keyed by reverse price for max-heap semantics; asks by ascending
+/// price. The matching engine mutates this structure and emits [`MarketEvent`]s.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OrderBook {
     pub bids: BTreeMap<std::cmp::Reverse<Price>, PriceLevel>,
@@ -141,6 +185,7 @@ pub struct OrderBook {
 }
 
 impl OrderBook {
+    /// Create an empty order book.
     pub fn new() -> Self {
         OrderBook {
             bids: BTreeMap::new(),

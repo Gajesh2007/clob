@@ -1,3 +1,8 @@
+//! Settlement plane binary entrypoint.
+//!
+//! Initializes logging, loads configuration, and runs the async settlement
+//! loop defined in `settlement_plane::run_settlement_plane` until Ctrl+C.
+//!
 use settlement_plane::run_settlement_plane;
 use std::error::Error;
 use configuration::Settings;

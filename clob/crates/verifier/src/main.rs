@@ -1,3 +1,8 @@
+//! Verifier binary entrypoint.
+//!
+//! Loads configuration and runs `verifier::run_verifier`, printing whether the
+//! locally reconstructed state matches the latest official checkpoint.
+//!
 use verifier::{run_verifier, VerifierError};
 use configuration::Settings;
 

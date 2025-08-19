@@ -13,7 +13,7 @@ This is the system's nervous system, engineered for absolute minimum latency. It
     *   **Hardware:** Enterprise-grade, low-latency network switches (e.g., Arista, Mellanox). Fiber optic cross-connects are established between trader racks and the Sequencer's ingress switches.
     *   **Protocols:**
         *   **Order Entry:** A simple, custom binary protocol (like NASDAQ's OUCH) over TCP for submitting signed orders, cancels, and modifications.
-        *   **Market Data:** A real-time "firehose" feed of all public order book events (like NASDAQ's ITCH) is broadcast via UDP Multicast.
+        *   **Market Data:** A real-time "firehose" feed of all public order book events is published via Redis Pub/Sub (and can be bridged to WebSockets/SSE for external consumers).
 3.  **Load Balancers & Ingress Nodes:**
     *   A fleet of simple ingress nodes receives the raw TCP connections. Their only job is to terminate the connection and immediately forward the raw, signed message payload to the next stage.
     *   **Hardware:** Standard 1U servers with high-end Network Interface Cards (NICs) capable of kernel bypass for low latency.

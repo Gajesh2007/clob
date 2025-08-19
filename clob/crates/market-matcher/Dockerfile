@@ -1,27 +1,24 @@
-# Stage 1: Builder
-# Compiles the market-matcher binary.
-FROM rust:1-slim-bookworm as builder
+# syntax=docker/dockerfile:1
 
-WORKDIR /usr/src/clob
+# Build stage
+FROM rust:1.78 as builder
+WORKDIR /app/clob
 
-# Copy the entire workspace to ensure all local dependencies are available.
-COPY . .
+# Copy the entire workspace; for better caching, consider a multi-step copy.
+COPY clob /app/clob
 
-# Build only the market-matcher binary in release mode.
-RUN cargo build --release --bin market-matcher
+# Build only the market-matcher binary in release mode
+RUN cargo build -p market-matcher --release
 
-
-# Stage 2: Final Image
-# Creates the minimal runtime image.
-FROM debian:bookworm-slim
-
+# Runtime stage
+FROM debian:bookworm-slim as runtime
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-# Copy the compiled binary from the builder stage.
-COPY --from=builder /usr/src/clob/target/release/market-matcher /usr/local/bin/
+# Copy the compiled binary
+COPY --from=builder /app/clob/target/release/market-matcher /usr/local/bin/market-matcher
 
-# Copy the configuration file.
-COPY config.toml .
+ENV RUST_LOG=info
 
-# Set the entrypoint.
-ENTRYPOINT ["market-matcher"]
+# No ports to expose (uses Redis Pub/Sub only)
+ENTRYPOINT ["/usr/local/bin/market-matcher"]

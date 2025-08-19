@@ -1,3 +1,4 @@
+#![cfg(feature = "integration_tests")]
 use std::error::Error;
 use tokio::time::{sleep, Duration};
 use tokio::process::Command;

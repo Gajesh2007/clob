@@ -32,3 +32,6 @@ market-matcher = { path = "../market-matcher" }
 settlement-plane = { path = "../settlement-plane" }
 ed25519-dalek = { workspace = true }
 redis-test = "0.2"
+
+[features]
+integration_tests = []
