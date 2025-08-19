@@ -86,26 +86,8 @@ async fn run_single_market(
             let order = signed_order.order;
             tracing::debug!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, "Received order from Redis");
 
-            let user_account = match account_cache.get(&order.user_id) {
-                Some(acc) => acc,
-                None => {
-                    // Soft reject if account is not present; deposit events should
-                    // warm the cache before orders arrive.
-                    tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, "Order rejected: User account not found in cache.");
-                    continue;
-                }
-            };
-            
-            let required_asset = if order.side == common_types::Side::Buy { AssetID(1) } else { AssetID(2) };
-            let required_amount = if order.side == common_types::Side::Buy { order.price * order.quantity } else { order.quantity };
-            
-            let balance = user_account.balances.get(&required_asset).copied().unwrap_or_default();
-            if balance < required_amount {
-                // Guard against obvious insufficient funds based on cached balance
-                tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, asset_id = required_asset.0, required_amount = %required_amount, balance = %balance, "Order rejected: Insufficient funds");
-                continue;
-            }
-            tracing::debug!(order_id = %order.order_id.0, user_id = %order.user_id, "Sufficient funds found, processing order.");
+            // Accept all orders into the book; balances are enforced via trade settlement updates
+            tracing::info!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, qty = %order.quantity, "Processing order");
 
             let events = order_book.process_order(order);
             for event in &events {
@@ -117,7 +99,7 @@ async fn run_single_market(
                     let total_price = trade.price * trade.quantity;
 
                     // Per-user locks to avoid shard deadlocks and ensure consistent updates
-                    let taker_is_buy = matches!(trade.taker_side, common_types::Side::Buy);
+                    let taker_is_buy = matches!(order.side, common_types::Side::Buy);
                     if trade.maker_user_id == trade.taker_user_id {
                         let lock = get_user_lock(&user_locks, trade.maker_user_id);
                         let _g = lock.lock().await;
