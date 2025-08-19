@@ -21,6 +21,7 @@ use redis::AsyncCommands;
 use tracing::{self, Level};
 use tracing_subscriber::FmtSubscriber;
 use tokio::time::{sleep, Duration};
+use rust_decimal::Decimal;
 
 #[derive(Error, Debug)]
 pub enum MatcherError {
@@ -38,6 +39,24 @@ pub enum MatcherError {
 
 type AccountCache = Arc<DashMap<UserID, Account>>;
 type UserLockMap = Arc<DashMap<UserID, Arc<AsyncMutex<()>>>>;
+type ReservedMap = Arc<DashMap<(UserID, AssetID), Decimal>>;
+
+fn get_reserved_amount(reserved: &ReservedMap, user_id: UserID, asset_id: AssetID) -> Decimal {
+    reserved.get(&(user_id, asset_id)).map(|v| *v).unwrap_or(Decimal::ZERO)
+}
+
+fn add_reserved(reserved: &ReservedMap, user_id: UserID, asset_id: AssetID, amount: Decimal) {
+    let key = (user_id, asset_id);
+    let mut entry = reserved.entry(key).or_insert(Decimal::ZERO);
+    *entry += amount;
+}
+
+fn sub_reserved(reserved: &ReservedMap, user_id: UserID, asset_id: AssetID, amount: Decimal) {
+    let key = (user_id, asset_id);
+    let mut entry = reserved.entry(key).or_insert(Decimal::ZERO);
+    *entry -= amount;
+    if entry.is_sign_negative() { *entry = Decimal::ZERO; }
+}
 
 fn get_user_lock(locks: &UserLockMap, user_id: UserID) -> Arc<AsyncMutex<()>> {
     if let Some(lock) = locks.get(&user_id) { return lock.clone(); }
@@ -52,6 +71,7 @@ async fn run_single_market(
     redis_client: redis::Client,
     account_cache: AccountCache,
     user_locks: UserLockMap,
+    reserved: ReservedMap,
 ) -> Result<(), MatcherError> {
     let mut order_book = OrderBook::new();
 
@@ -86,8 +106,23 @@ async fn run_single_market(
             let order = signed_order.order;
             tracing::debug!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, "Received order from Redis");
 
-            // Accept all orders into the book; balances are enforced via trade settlement updates
-            tracing::info!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, qty = %order.quantity, "Processing order");
+            // Enforce available funds by reserving under user lock
+            let taker_lock = get_user_lock(&user_locks, order.user_id);
+            let _guard = taker_lock.lock().await;
+            let required_asset = if order.side == common_types::Side::Buy { AssetID(1) } else { AssetID(2) };
+            let required_amount = if order.side == common_types::Side::Buy { order.price * order.quantity } else { order.quantity };
+            let current_balance = account_cache
+                .get(&order.user_id)
+                .and_then(|acc| acc.balances.get(&required_asset).copied())
+                .unwrap_or(Decimal::ZERO);
+            let already_reserved = get_reserved_amount(&reserved, order.user_id, required_asset);
+            let available = current_balance - already_reserved;
+            if available < required_amount {
+                tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, need = %required_amount, available = %available, asset = %required_asset.0, "Order rejected: insufficient available funds");
+                continue;
+            }
+            add_reserved(&reserved, order.user_id, required_asset, required_amount);
+            tracing::debug!(order_id = %order.order_id.0, user_id = %order.user_id, reserved = %required_amount, asset = %required_asset.0, "Reserved available funds for order");
 
             let events = order_book.process_order(order);
             for event in &events {
@@ -137,6 +172,9 @@ async fn run_single_market(
                                 *taker_account.balances.entry(asset1).or_default() -= total_price;
                                 *taker_account.balances.entry(asset2).or_default() += trade.quantity;
                             }
+                            // Release reservations for executed portions
+                            sub_reserved(&reserved, trade.taker_user_id, asset1, total_price);
+                            sub_reserved(&reserved, trade.maker_user_id, asset2, trade.quantity);
                             if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
                                 *maker_account.balances.entry(asset1).or_default() += total_price;
                                 *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
@@ -146,6 +184,8 @@ async fn run_single_market(
                                 *taker_account.balances.entry(asset2).or_default() -= trade.quantity;
                                 *taker_account.balances.entry(asset1).or_default() += total_price;
                             }
+                            sub_reserved(&reserved, trade.taker_user_id, asset2, trade.quantity);
+                            sub_reserved(&reserved, trade.maker_user_id, asset1, total_price);
                             if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
                                 *maker_account.balances.entry(asset2).or_default() += trade.quantity;
                                 *maker_account.balances.entry(asset1).or_default() -= total_price;
@@ -202,6 +242,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let redis_client = redis::Client::open(settings.redis_addr.as_str())?;
     let account_cache: AccountCache = Arc::new(DashMap::new());
     let user_locks: UserLockMap = Arc::new(DashMap::new());
+    let reserved: ReservedMap = Arc::new(DashMap::new());
 
     let acc_cache_clone = account_cache.clone();
     let user_locks_clone = user_locks.clone();
@@ -254,6 +295,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             redis_client.clone(),
             account_cache.clone(),
             user_locks.clone(),
+            reserved.clone(),
         ));
         handles.push(handle);
     }
