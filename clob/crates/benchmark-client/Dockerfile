@@ -7,6 +7,11 @@ WORKDIR /app/clob
 # Copy the workspace directory (contains Cargo.toml)
 COPY clob /app/clob
 
+# Install build dependencies for OpenSSL
+RUN apt-get update && \
+    apt-get install -y pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 # Build only the benchmark-client binary in release mode.
 RUN cargo build --release --bin benchmark-client
 
