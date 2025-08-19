@@ -94,13 +94,20 @@ if ! grep -qiE 'linux' /proc/version 2>/dev/null; then
   NETWORK_FLAGS=( -p "${REDIS_PORT}:6379" )
 fi
 
+# Only set container-level sysctls when NOT using host networking. Docker forbids
+# setting non-namespaced sysctls (like net.core.somaxconn) in host network namespace.
+SYSCTL_DOCKER_FLAGS=()
+if [[ "${NETWORK_FLAGS[0]-}" != "--network" || "${NETWORK_FLAGS[1]-}" != "host" ]]; then
+  SYSCTL_DOCKER_FLAGS=( --sysctl net.core.somaxconn=65535 )
+fi
+
 echo "[redis] Starting container ${REDIS_NAME} (mode=${REDIS_MODE})"
 docker run -d \
   --name "${REDIS_NAME}" \
   "${NETWORK_FLAGS[@]}" \
   --restart unless-stopped \
   --ulimit nofile=1000000:1000000 \
-  --sysctl net.core.somaxconn=65535 \
+  ${SYSCTL_DOCKER_FLAGS[@]} \
   ${RUN_FLAGS[@]} \
   "${REDIS_IMAGE}" \
   redis-server \
