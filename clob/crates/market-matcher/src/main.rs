@@ -14,6 +14,7 @@ use matching_engine::MatchingEngine;
 use configuration::Settings;
 use thiserror::Error;
 use dashmap::DashMap;
+use tokio::sync::Mutex as AsyncMutex;
 use std::collections::BTreeMap;
 use futures_util::StreamExt;
 use redis::AsyncCommands;
@@ -36,12 +37,21 @@ pub enum MatcherError {
 }
 
 type AccountCache = Arc<DashMap<UserID, Account>>;
+type UserLockMap = Arc<DashMap<UserID, Arc<AsyncMutex<()>>>>;
+
+fn get_user_lock(locks: &UserLockMap, user_id: UserID) -> Arc<AsyncMutex<()>> {
+    if let Some(lock) = locks.get(&user_id) { return lock.clone(); }
+    let lock = Arc::new(AsyncMutex::new(()));
+    let _ = locks.insert(user_id, lock.clone());
+    lock
+}
 
 async fn run_single_market(
     market_id: MarketID,
     settings: Settings,
     redis_client: redis::Client,
     account_cache: AccountCache,
+    user_locks: UserLockMap,
 ) -> Result<(), MatcherError> {
     let mut order_book = OrderBook::new();
 
@@ -106,9 +116,11 @@ async fn run_single_market(
                     let asset2 = AssetID(2);
                     let total_price = trade.price * trade.quantity;
 
+                    // Per-user locks to avoid shard deadlocks and ensure consistent updates
                     if trade.maker_user_id == trade.taker_user_id {
+                        let lock = get_user_lock(&user_locks, trade.maker_user_id);
+                        let _g = lock.lock().await;
                         if let Some(mut account) = account_cache.get_mut(&trade.maker_user_id) {
-                            // Self-trade: apply both sides sequentially under a single lock
                             *account.balances.entry(asset1).or_default() -= total_price;
                             *account.balances.entry(asset2).or_default() += trade.quantity;
                             *account.balances.entry(asset1).or_default() += total_price;
@@ -117,20 +129,24 @@ async fn run_single_market(
                             tracing::error!(trade_id = trade.trade_id.0, user_id = %trade.maker_user_id, "CRITICAL: Account not found for a self-trade; skipping balance update");
                         }
                     } else {
-                        // Update taker then maker sequentially to avoid double-locking the same shard
-                        if account_cache.contains_key(&trade.taker_user_id) && account_cache.contains_key(&trade.maker_user_id) {
-                            if let Some(mut taker_account) = account_cache.get_mut(&trade.taker_user_id) {
-                                *taker_account.balances.entry(asset1).or_default() -= total_price;
-                                *taker_account.balances.entry(asset2).or_default() += trade.quantity;
-                            }
-                            if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
-                                *maker_account.balances.entry(asset1).or_default() += total_price;
-                                *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
-                            }
+                        // Lock acquisition in a stable order by user id to prevent deadlocks
+                        let (first, second) = if trade.maker_user_id.0 < trade.taker_user_id.0 {
+                            (trade.maker_user_id, trade.taker_user_id)
                         } else {
-                            let maker_present = account_cache.contains_key(&trade.maker_user_id);
-                            let taker_present = account_cache.contains_key(&trade.taker_user_id);
-                            tracing::error!(trade_id = trade.trade_id.0, %maker_present, %taker_present, "CRITICAL: Account missing for processed trade; skipping balance update");
+                            (trade.taker_user_id, trade.maker_user_id)
+                        };
+                        let first_lock = get_user_lock(&user_locks, first);
+                        let second_lock = get_user_lock(&user_locks, second);
+                        let _g1 = first_lock.lock().await;
+                        let _g2 = second_lock.lock().await;
+                        // Apply updates
+                        if let Some(mut taker_account) = account_cache.get_mut(&trade.taker_user_id) {
+                            *taker_account.balances.entry(asset1).or_default() -= total_price;
+                            *taker_account.balances.entry(asset2).or_default() += trade.quantity;
+                        }
+                        if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
+                            *maker_account.balances.entry(asset1).or_default() += total_price;
+                            *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
                         }
                     }
                 }
@@ -184,6 +200,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let account_cache: AccountCache = Arc::new(DashMap::new());
 
     let acc_cache_clone = account_cache.clone();
+    let user_locks_clone = user_locks.clone();
     let redis_client_clone = redis_client.clone();
     tokio::spawn(async move {
         // Maintain local account cache by consuming deposit broadcasts with auto-reconnect
@@ -204,12 +221,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut deposit_stream = pubsub.on_message();
             while let Some(msg) = deposit_stream.next().await {
                 if let Ok(Transaction::Deposit(deposit)) = bincode::deserialize(msg.get_payload_bytes()) {
-                    acc_cache_clone.entry(deposit.user_id).or_insert_with(|| Account {
-                        user_id: deposit.user_id,
-                        balances: BTreeMap::new(),
-                    });
-                    let mut account = acc_cache_clone.get_mut(&deposit.user_id).unwrap();
-                    *account.balances.entry(deposit.asset_id).or_default() += deposit.amount;
+                    let lock = get_user_lock(&user_locks_clone, deposit.user_id);
+                    let _g = lock.lock().await;
+                    acc_cache_clone.entry(deposit.user_id).or_insert_with(|| Account { user_id: deposit.user_id, balances: BTreeMap::new() });
+                    if let Some(mut account) = acc_cache_clone.get_mut(&deposit.user_id) {
+                        *account.balances.entry(deposit.asset_id).or_default() += deposit.amount;
+                    }
                     tracing::info!(user_id = %deposit.user_id, "Processed deposit");
                 }
             }
