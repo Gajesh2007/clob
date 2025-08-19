@@ -129,7 +129,7 @@ async fn run_single_market(
             let events = order_book.process_order(order);
             for event in &events {
                 if let MarketEvent::OrderTraded(trade) = event {
-                    tracing::info!(trade_id = trade.trade_id.0, maker_order_id = trade.maker_order_id.0, taker_order_id = trade.taker_order_id.0, "Processed trade");
+                    tracing::debug!(trade_id = trade.trade_id.0, maker_order_id = trade.maker_order_id.0, taker_order_id = trade.taker_order_id.0, "Processed trade");
 
                     let asset1 = AssetID(1);
                     let asset2 = AssetID(2);
