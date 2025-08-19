@@ -71,7 +71,7 @@ async fn handle_connection(
         // Deserialize the SignedOrder from the frame body
         let signed_order: SignedOrder = bincode::deserialize(&buffer)?;
         let order = signed_order.order;
-        info!(order_id = %order.order_id.0, user_id = %order.user_id, "Received order");
+        tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, "Received order");
 
         // Look up the user's public key and verify the ED25519 signature
         let public_key = public_key_cache.get(&order.user_id).ok_or(IngressError::PublicKeyNotFound(order.user_id))?;
@@ -89,7 +89,7 @@ async fn handle_connection(
         let tx = Transaction::SignedOrder(signed_order);
         let payload = bincode::serialize(&tx)?;
         
-        info!(order_id = %order.order_id.0, channel = %channel, "Publishing order to Redis");
+        tracing::warn!(order_id = %order.order_id.0, channel = %channel, "Publishing order to Redis");
         let mut attempt: u8 = 0;
         loop {
             let result = redis::pipe()
