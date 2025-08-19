@@ -7,9 +7,9 @@ WORKDIR /app/clob
 # Copy the workspace directory (contains Cargo.toml)
 COPY clob /app/clob
 
-# Minimal build dependencies (no OpenSSL needed when using rustls)
+# Install build dependencies for OpenSSL
 RUN apt-get update && \
-    apt-get install -y pkg-config && \
+    apt-get install -y pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Build only the benchmark-client binary in release mode.
@@ -22,9 +22,9 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# No OpenSSL runtime needed; include CA certs for HTTPS
+# Install runtime dependencies for OpenSSL and TLS
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends libssl3 ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binary from the builder stage.
