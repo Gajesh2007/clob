@@ -74,7 +74,7 @@ async fn run_single_market(
         // Deserialize orders from Redis Pub/Sub and process through the engine
         if let Ok(Transaction::SignedOrder(signed_order)) = bincode::deserialize(msg.get_payload_bytes()) {
             let order = signed_order.order;
-            tracing::info!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, "Received order from Redis");
+            tracing::debug!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, "Received order from Redis");
 
             let user_account = match account_cache.get(&order.user_id) {
                 Some(acc) => acc,
@@ -95,51 +95,42 @@ async fn run_single_market(
                 tracing::warn!(order_id = %order.order_id.0, user_id = %order.user_id, asset_id = required_asset.0, required_amount = %required_amount, balance = %balance, "Order rejected: Insufficient funds");
                 continue;
             }
-            tracing::info!(order_id = %order.order_id.0, user_id = %order.user_id, "Sufficient funds found, processing order.");
+            tracing::debug!(order_id = %order.order_id.0, user_id = %order.user_id, "Sufficient funds found, processing order.");
 
             let events = order_book.process_order(order);
             for event in &events {
                 if let MarketEvent::OrderTraded(trade) = event {
                     tracing::info!(trade_id = trade.trade_id.0, maker_order_id = trade.maker_order_id.0, taker_order_id = trade.taker_order_id.0, "Processed trade");
 
+                    let asset1 = AssetID(1);
+                    let asset2 = AssetID(2);
+                    let total_price = trade.price * trade.quantity;
+
                     if trade.maker_user_id == trade.taker_user_id {
                         if let Some(mut account) = account_cache.get_mut(&trade.maker_user_id) {
-                            // Self-trade: update the single account. The net effect
-                            // on balances is zero, but we apply both sides to maintain
-                            // logical consistency with the generated trade event.
-                            let asset1 = AssetID(1);
-                            let asset2 = AssetID(2);
-                            let total_price = trade.price * trade.quantity;
-
-                            // Taker side of the trade
+                            // Self-trade: apply both sides sequentially under a single lock
                             *account.balances.entry(asset1).or_default() -= total_price;
                             *account.balances.entry(asset2).or_default() += trade.quantity;
-
-                            // Maker side of the trade
                             *account.balances.entry(asset1).or_default() += total_price;
                             *account.balances.entry(asset2).or_default() -= trade.quantity;
                         } else {
-                             tracing::error!(trade_id = trade.trade_id.0, "CRITICAL: Account not found for a self-trade. UserID: {}. Skipping balance update.", trade.maker_user_id);
+                            tracing::error!(trade_id = trade.trade_id.0, user_id = %trade.maker_user_id, "CRITICAL: Account not found for a self-trade; skipping balance update");
                         }
                     } else {
-                        // Different users, get both accounts
-                        let maker_account_opt = account_cache.get_mut(&trade.maker_user_id);
-                        let taker_account_opt = account_cache.get_mut(&trade.taker_user_id);
-
-                        if maker_account_opt.is_some() && taker_account_opt.is_some() {
-                            let mut maker_account = maker_account_opt.unwrap();
-                            let mut taker_account = taker_account_opt.unwrap();
-
-                            let asset1 = AssetID(1);
-                            let asset2 = AssetID(2);
-                            let total_price = trade.price * trade.quantity;
-                            
-                            *taker_account.balances.entry(asset1).or_default() -= total_price;
-                            *taker_account.balances.entry(asset2).or_default() += trade.quantity;
-                            *maker_account.balances.entry(asset1).or_default() += total_price;
-                            *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
+                        // Update taker then maker sequentially to avoid double-locking the same shard
+                        if account_cache.contains_key(&trade.taker_user_id) && account_cache.contains_key(&trade.maker_user_id) {
+                            if let Some(mut taker_account) = account_cache.get_mut(&trade.taker_user_id) {
+                                *taker_account.balances.entry(asset1).or_default() -= total_price;
+                                *taker_account.balances.entry(asset2).or_default() += trade.quantity;
+                            }
+                            if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
+                                *maker_account.balances.entry(asset1).or_default() += total_price;
+                                *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
+                            }
                         } else {
-                            tracing::error!(trade_id = trade.trade_id.0, "CRITICAL: Account not found for a processed trade. Maker found: {}, Taker found: {}. Skipping balance update.", maker_account_opt.is_some(), taker_account_opt.is_some());
+                            let maker_present = account_cache.contains_key(&trade.maker_user_id);
+                            let taker_present = account_cache.contains_key(&trade.taker_user_id);
+                            tracing::error!(trade_id = trade.trade_id.0, %maker_present, %taker_present, "CRITICAL: Account missing for processed trade; skipping balance update");
                         }
                     }
                 }
