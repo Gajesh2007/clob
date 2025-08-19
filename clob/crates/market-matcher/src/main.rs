@@ -117,14 +117,24 @@ async fn run_single_market(
                     let total_price = trade.price * trade.quantity;
 
                     // Per-user locks to avoid shard deadlocks and ensure consistent updates
+                    let taker_is_buy = matches!(trade.taker_side, common_types::Side::Buy);
                     if trade.maker_user_id == trade.taker_user_id {
                         let lock = get_user_lock(&user_locks, trade.maker_user_id);
                         let _g = lock.lock().await;
                         if let Some(mut account) = account_cache.get_mut(&trade.maker_user_id) {
-                            *account.balances.entry(asset1).or_default() -= total_price;
-                            *account.balances.entry(asset2).or_default() += trade.quantity;
-                            *account.balances.entry(asset1).or_default() += total_price;
-                            *account.balances.entry(asset2).or_default() -= trade.quantity;
+                            if taker_is_buy {
+                                // Buyer (taker) and seller (maker) are the same user
+                                *account.balances.entry(asset1).or_default() -= total_price;
+                                *account.balances.entry(asset2).or_default() += trade.quantity;
+                                *account.balances.entry(asset1).or_default() += total_price;
+                                *account.balances.entry(asset2).or_default() -= trade.quantity;
+                            } else {
+                                // Seller (taker) and buyer (maker) are the same user
+                                *account.balances.entry(asset2).or_default() -= trade.quantity;
+                                *account.balances.entry(asset1).or_default() += total_price;
+                                *account.balances.entry(asset2).or_default() += trade.quantity;
+                                *account.balances.entry(asset1).or_default() -= total_price;
+                            }
                         } else {
                             tracing::error!(trade_id = trade.trade_id.0, user_id = %trade.maker_user_id, "CRITICAL: Account not found for a self-trade; skipping balance update");
                         }
@@ -139,14 +149,25 @@ async fn run_single_market(
                         let second_lock = get_user_lock(&user_locks, second);
                         let _g1 = first_lock.lock().await;
                         let _g2 = second_lock.lock().await;
-                        // Apply updates
-                        if let Some(mut taker_account) = account_cache.get_mut(&trade.taker_user_id) {
-                            *taker_account.balances.entry(asset1).or_default() -= total_price;
-                            *taker_account.balances.entry(asset2).or_default() += trade.quantity;
-                        }
-                        if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
-                            *maker_account.balances.entry(asset1).or_default() += total_price;
-                            *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
+                        // Apply updates according to the taker's side
+                        if taker_is_buy {
+                            if let Some(mut taker_account) = account_cache.get_mut(&trade.taker_user_id) {
+                                *taker_account.balances.entry(asset1).or_default() -= total_price;
+                                *taker_account.balances.entry(asset2).or_default() += trade.quantity;
+                            }
+                            if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
+                                *maker_account.balances.entry(asset1).or_default() += total_price;
+                                *maker_account.balances.entry(asset2).or_default() -= trade.quantity;
+                            }
+                        } else {
+                            if let Some(mut taker_account) = account_cache.get_mut(&trade.taker_user_id) {
+                                *taker_account.balances.entry(asset2).or_default() -= trade.quantity;
+                                *taker_account.balances.entry(asset1).or_default() += total_price;
+                            }
+                            if let Some(mut maker_account) = account_cache.get_mut(&trade.maker_user_id) {
+                                *maker_account.balances.entry(asset2).or_default() += trade.quantity;
+                                *maker_account.balances.entry(asset1).or_default() -= total_price;
+                            }
                         }
                     }
                 }

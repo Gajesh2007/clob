@@ -135,6 +135,7 @@ pub struct Trade {
     pub quantity: Quantity,
     pub price: Price,
     pub timestamp: u64,
+    pub taker_side: Side,
 }
 
 /// Events emitted by the matching engine.

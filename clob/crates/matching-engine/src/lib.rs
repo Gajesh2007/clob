@@ -139,6 +139,7 @@ fn execute_trades(
             quantity: trade_qty,
             price: maker_order.price,
             timestamp: taker_order.timestamp,
+            taker_side: taker_order.side,
         };
         *next_trade_id += 1;
         events.push(MarketEvent::OrderTraded(trade));
