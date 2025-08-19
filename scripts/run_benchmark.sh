@@ -48,14 +48,33 @@ EVENT_SOURCE=${EVENT_SOURCE:-redis}
 GATEWAY_ADDR=${GATEWAY_ADDR:-127.0.0.1:9100}
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "[benchmark] Installing Docker..."
-  sudo apt-get update -y
-  sudo apt-get install -y ca-certificates curl gnupg lsb-release
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-  sudo apt-get update -y
-  sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-  sudo systemctl enable --now docker
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "[benchmark] Installing Docker via apt..."
+    . /etc/os-release 2>/dev/null || true
+    DISTRO_ID=${ID:-debian}
+    CODENAME=${VERSION_CODENAME:-}
+    if [[ -z "${CODENAME}" ]] && command -v lsb_release >/dev/null 2>&1; then
+      CODENAME=$(lsb_release -cs)
+    fi
+    # Map distro id to Docker repo path
+    case "${DISTRO_ID}" in
+      ubuntu) DOCKER_LINUX_PATH=ubuntu ;;
+      debian|*) DOCKER_LINUX_PATH=debian ;;
+    esac
+
+    sudo apt-get update -y
+    sudo apt-get install -y ca-certificates curl gnupg lsb-release
+    sudo install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/${DOCKER_LINUX_PATH}/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DOCKER_LINUX_PATH} ${CODENAME} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+    sudo apt-get update -y
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    sudo systemctl enable --now docker || true
+  else
+    echo "Docker is required but not installed. Please install Docker for your OS." >&2
+    exit 1
+  fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
