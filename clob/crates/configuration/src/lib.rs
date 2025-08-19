@@ -51,8 +51,8 @@ impl Settings {
     pub fn load() -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
             .set_default("redis_addr", "redis://10.10.0.2:6379/")?
-            .set_default("execution_plane.tcp_listen_addr", "0.0.0.1:8080")?
-            .set_default("execution_plane.http_listen_addr", "0.0.0.1:9090")?
+            .set_default("execution_plane.tcp_listen_addr", "0.0.0.0:8080")?
+            .set_default("execution_plane.http_listen_addr", "0.0.0.0:9090")?
             .set_default("execution_plane.execution_log_path", "execution.log")?
             .set_default("settlement_plane.checkpoint_interval_seconds", 5)?
             .set_default("settlement_plane.eigenda_proxy_url", "http://10.10.0.3:3100/put?commitment_mode=standard")?

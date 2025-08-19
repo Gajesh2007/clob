@@ -12,6 +12,7 @@ set -euo pipefail
 #   TCP_PORT       (default: 8080)
 #   HTTP_PORT      (default: 9090)
 #   RUST_LOG       (default: info)
+#   HOST_BIND      (default: 0.0.0.0) host interface to bind published ports
 
 IMAGE_NAME=${IMAGE_NAME:-ingress-verifier:local}
 CONTAINER_NAME=${CONTAINER_NAME:-ingress-verifier}
@@ -19,6 +20,7 @@ REDIS_ADDR=${REDIS_ADDR:-redis://10.10.0.2:6379/}
 TCP_PORT=${TCP_PORT:-8080}
 HTTP_PORT=${HTTP_PORT:-9090}
 RUST_LOG=${RUST_LOG:-info}
+HOST_BIND=${HOST_BIND:-0.0.0.0}
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required but not installed. Please install Docker." >&2
@@ -36,8 +38,8 @@ echo "[ingress-verifier] Starting container..."
 docker run -d \
   --name "${CONTAINER_NAME}" \
   --restart unless-stopped \
-  -p "${TCP_PORT}:8080" \
-  -p "${HTTP_PORT}:9090" \
+  -p "${HOST_BIND}:${TCP_PORT}:8080" \
+  -p "${HOST_BIND}:${HTTP_PORT}:9090" \
   -e RUST_LOG="${RUST_LOG}" \
   -e CLOB_REDIS_ADDR="${REDIS_ADDR}" \
   -e CLOB_EXECUTION_PLANE__TCP_LISTEN_ADDR="0.0.0.0:8080" \
@@ -56,7 +58,7 @@ for _ in {1..30}; do
 done
 
 echo "[ingress-verifier] Running."
-echo "  TCP ingest: tcp://127.0.0.1:${TCP_PORT}"
-echo "  HTTP API:   http://127.0.0.1:${HTTP_PORT}"
+echo "  TCP ingest: tcp://${HOST_BIND}:${TCP_PORT}"
+echo "  HTTP API:   http://${HOST_BIND}:${HTTP_PORT}"
 echo "  Redis addr: ${REDIS_ADDR}"
 echo "  Logs:       docker logs -f ${CONTAINER_NAME}"
