@@ -18,7 +18,7 @@ WORKDIR /app
 # Copy the compiled binary
 COPY --from=builder /app/clob/target/release/market-matcher /usr/local/bin/market-matcher
 
-ENV RUST_LOG=info
+ENV RUST_LOG=warn
 
 # No ports to expose (uses Redis Pub/Sub only)
 ENTRYPOINT ["/usr/local/bin/market-matcher"]

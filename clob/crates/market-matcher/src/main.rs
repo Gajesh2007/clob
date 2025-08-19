@@ -9,7 +9,7 @@
 //!
 use std::error::Error;
 use std::sync::Arc;
-use common_types::{MarketID, OrderBook, MarketEvent, Account, UserID, AssetID, Transaction};
+use common_types::{MarketID, OrderBook, MarketEvent, Account, UserID, AssetID, Transaction, should_sample, make_perf_event};
 use matching_engine::MatchingEngine;
 use configuration::Settings;
 use thiserror::Error;
@@ -105,6 +105,11 @@ async fn run_single_market(
         if let Ok(Transaction::SignedOrder(signed_order)) = bincode::deserialize(msg.get_payload_bytes()) {
             let order = signed_order.order;
             tracing::debug!(order_id = %order.order_id.0, user_id = %order.user_id, side = ?order.side, price = %order.price, "Received order from Redis");
+            if should_sample(order.order_id.0) {
+                let ev = make_perf_event(order.order_id.0, order.market_id.0, 30);
+                let mut c = redis_client.get_multiplexed_async_connection().await?;
+                let _ : Result<(), _> = redis::cmd("RPUSH").arg("perf:events").arg(bincode::serialize(&ev).unwrap()).query_async(&mut c).await;
+            }
 
             // Enforce available funds by reserving under user lock (drop before matching)
             {
@@ -127,6 +132,11 @@ async fn run_single_market(
             }
 
             let events = order_book.process_order(order);
+            if should_sample(order.order_id.0) {
+                let ev = make_perf_event(order.order_id.0, order.market_id.0, 40);
+                let mut c = redis_client.get_multiplexed_async_connection().await?;
+                let _ : Result<(), _> = redis::cmd("RPUSH").arg("perf:events").arg(bincode::serialize(&ev).unwrap()).query_async(&mut c).await;
+            }
             for event in &events {
                 if let MarketEvent::OrderTraded(trade) = event {
                     tracing::debug!(trade_id = trade.trade_id.0, maker_order_id = trade.maker_order_id.0, taker_order_id = trade.taker_order_id.0, "Processed trade");
@@ -219,6 +229,13 @@ async fn run_single_market(
                         Err(e2) => {
                             tracing::error!(error = %e2, "Failed to re-establish publisher connection; dropping event");
                         }
+                    }
+                }
+                if let common_types::MarketEvent::OrderTraded(trade) = event {
+                    if should_sample(trade.taker_order_id.0) {
+                        let ev = make_perf_event(trade.taker_order_id.0, trade.market_id.0, 50);
+                        let mut c = redis_client.get_multiplexed_async_connection().await?;
+                        let _ : Result<(), _> = redis::cmd("RPUSH").arg("perf:events").arg(bincode::serialize(&ev).unwrap()).query_async(&mut c).await;
                     }
                 }
             }

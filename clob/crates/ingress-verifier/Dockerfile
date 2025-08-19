@@ -20,7 +20,7 @@ WORKDIR /app
 COPY --from=builder /app/clob/target/release/ingress-verifier /usr/local/bin/ingress-verifier
 
 # Default logging level
-ENV RUST_LOG=info
+ENV RUST_LOG=warn
 
 # Service listens on these (configurable via env)
 EXPOSE 8080 9090

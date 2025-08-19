@@ -15,7 +15,7 @@ use std::error::Error;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::AsyncReadExt;
-use common_types::{SignedOrder, UserID, Deposit, Transaction, AssetID};
+use common_types::{SignedOrder, UserID, Deposit, Transaction, AssetID, PerfEvent, should_sample, make_perf_event};
 use configuration::Settings;
 use ed25519_dalek::{Verifier, VerifyingKey, SigningKey};
 use dashmap::DashMap;
@@ -72,6 +72,11 @@ async fn handle_connection(
         let signed_order: SignedOrder = bincode::deserialize(&buffer)?;
         let order = signed_order.order;
         info!(order_id = %order.order_id.0, user_id = %order.user_id, "Received order");
+        // perf: client->ingress receive
+        if should_sample(order.order_id.0) {
+            let ev = make_perf_event(order.order_id.0, order.market_id.0, 10);
+            let _: Result<(), _> = redis::cmd("RPUSH").arg("perf:events").arg(bincode::serialize(&ev).unwrap()).query_async(&mut redis_conn).await;
+        }
 
         // Look up the user's public key and verify the ED25519 signature
         let public_key = public_key_cache.get(&order.user_id).ok_or(IngressError::PublicKeyNotFound(order.user_id))?;
@@ -98,7 +103,13 @@ async fn handle_connection(
                 .query_async::<_, ()>(&mut redis_conn)
                 .await;
             match result {
-                Ok(_) => break,
+                Ok(_) => {
+                    if should_sample(order.order_id.0) {
+                        let ev = make_perf_event(order.order_id.0, order.market_id.0, 20);
+                        let _: Result<(), _> = redis::cmd("RPUSH").arg("perf:events").arg(bincode::serialize(&ev).unwrap()).query_async(&mut redis_conn).await;
+                    }
+                    break
+                },
                 Err(e) => {
                     attempt += 1;
                     if attempt >= 2 {

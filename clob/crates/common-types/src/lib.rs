@@ -19,6 +19,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // --- Financial Primitives ---
 /// Price in quote currency per one unit of base currency.
@@ -182,6 +184,41 @@ pub struct OrderBook {
     pub bids: BTreeMap<std::cmp::Reverse<Price>, PriceLevel>,
     pub asks: BTreeMap<Price, PriceLevel>,
     pub next_trade_id: u64,
+}
+
+// --- Lightweight perf instrumentation ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerfEvent {
+    pub order_id: u64,
+    pub market_id: u32,
+    pub stage: u8,
+    pub ts_ns: u64,
+}
+
+static PERF_ENABLED: OnceLock<bool> = OnceLock::new();
+static PERF_SAMPLE_N: OnceLock<u64> = OnceLock::new();
+
+pub fn perf_enabled() -> bool {
+    *PERF_ENABLED.get_or_init(|| std::env::var("CLOB_PERF_METRICS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false))
+}
+
+pub fn perf_sample_n() -> u64 {
+    *PERF_SAMPLE_N.get_or_init(|| std::env::var("CLOB_PERF_SAMPLE_N").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&n| n > 0).unwrap_or(100))
+}
+
+pub fn should_sample(order_id: u64) -> bool {
+    if !perf_enabled() { return false; }
+    let n = perf_sample_n();
+    order_id % n == 0
+}
+
+pub fn now_ns() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+}
+
+pub fn make_perf_event(order_id: u64, market_id: u32, stage: u8) -> PerfEvent {
+    PerfEvent { order_id, market_id, stage, ts_ns: now_ns() }
 }
 
 impl OrderBook {

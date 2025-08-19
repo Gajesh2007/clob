@@ -24,6 +24,7 @@ use rand::Rng;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use redis::AsyncCommands;
+use common_types::{make_perf_event, should_sample};
 use clap::Parser;
 use tracing::{info, error};
 use dashmap::DashMap;
@@ -272,6 +273,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 pending_orders_clone.insert(order.order_id, Instant::now());
                 orders_sent_clone.fetch_add(1, Ordering::SeqCst);
                 
+                if should_sample(order.order_id.0) {
+                    let ev = make_perf_event(order.order_id.0, market_id, 0);
+                    let _: Result<(), _> = redis::cmd("RPUSH").arg("perf:events").arg(bincode::serialize(&ev).unwrap()).query_async(&mut redis_conn).await;
+                }
                 if let Err(e) = send_order(&mut stream, &signed_order).await {
                     error!("Failed to send order: {}. Closing connection.", e);
                     pending_orders_clone.remove(&order.order_id);
