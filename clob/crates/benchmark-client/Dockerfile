@@ -25,5 +25,5 @@ WORKDIR /app
 # Copy the compiled binary from the builder stage.
 COPY --from=builder /app/clob/target/release/benchmark-client /usr/local/bin/
 
-# Set the entrypoint.
-CMD ["benchmark-client"]
+# Set entrypoint so additional docker run args are forwarded to the binary
+ENTRYPOINT ["/usr/local/bin/benchmark-client"]
