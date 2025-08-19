@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.78 as builder
+FROM rust:slim-bookworm AS builder
 WORKDIR /app/clob
 COPY clob /app/clob
 RUN cargo build -p market-matcher-gateway --release

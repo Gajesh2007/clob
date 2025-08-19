@@ -1,6 +1,6 @@
 # Stage 1: Builder
 # Compiles the benchmark-client binary.
-FROM rust:1-slim-bookworm as builder
+FROM rust:slim-bookworm AS builder
 
 WORKDIR /usr/src/clob
 

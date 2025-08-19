@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage
-FROM rust:1.78 as builder
+FROM rust:slim-bookworm AS builder
 WORKDIR /app/clob
 
 # Copy the entire workspace; for better caching, consider a multi-step copy.
