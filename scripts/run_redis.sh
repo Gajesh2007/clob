@@ -2,25 +2,29 @@
 
 set -euo pipefail
 
-# Tuned Redis runner for Linux (Debian/Ubuntu). Uses host networking and kernel tuning
-# for maximum throughput. Supports two modes via REDIS_MODE:
+# Tuned Redis runner for Linux (Debian/Ubuntu). Defaults to port mapping so ports
+# are visible in `docker ps`. Supports two modes via REDIS_MODE:
 #   fast      -> in-memory only (no persistence), safest for benchmarks
 #   durable   -> AOF everysec, RDB disabled (good perf with durability)
 #
 # Environment overrides:
 #   REDIS_MODE       (fast|durable) default: fast
-#   REDIS_IMAGE      default: redis:7
+#   REDIS_IMAGE      default: redis:latest
 #   REDIS_NAME       default: redis-server
-#   REDIS_PORT       default: 6379 (used only if host network not available)
+#   REDIS_PORT       default: 6379
+#   REDIS_HOST_BIND  default: 0.0.0.0 (host bind addr for -p)
+#   REDIS_NETWORK    (ports|host) default: ports; host requires Linux and will hide Ports in `docker ps`
 #   IO_THREADS       default: 4
 #   TMPFS_SIZE       default: 4g (fast mode tmpfs size)
 #   BIND_ADDR        default: 0.0.0.0 (listen on all interfaces)
 #   PROTECTED_MODE   default: no (must be 'yes' to restrict to localhost)
 
 REDIS_MODE=${REDIS_MODE:-fast}
-REDIS_IMAGE=${REDIS_IMAGE:-redis:7}
+REDIS_IMAGE=${REDIS_IMAGE:-redis:latest}
 REDIS_NAME=${REDIS_NAME:-redis-server}
 REDIS_PORT=${REDIS_PORT:-6379}
+REDIS_HOST_BIND=${REDIS_HOST_BIND:-0.0.0.0}
+REDIS_NETWORK=${REDIS_NETWORK:-ports}
 IO_THREADS=${IO_THREADS:-4}
 TMPFS_SIZE=${TMPFS_SIZE:-4g}
 BIND_ADDR=${BIND_ADDR:-0.0.0.0}
@@ -86,12 +90,21 @@ case "${REDIS_MODE}" in
     ;;
 esac
 
-# Prefer host networking on Linux to avoid NAT overhead
-NETWORK_FLAGS=( --network host )
-
-# Fallback to port mapping if host network not available (non-Linux)
-if ! grep -qiE 'linux' /proc/version 2>/dev/null; then
-  NETWORK_FLAGS=( -p "${REDIS_PORT}:6379" )
+# Networking: default to explicit port mapping so ports show up in `docker ps`
+NETWORK_FLAGS=()
+if grep -qiE 'linux' /proc/version 2>/dev/null; then
+  case "${REDIS_NETWORK}" in
+    host)
+      NETWORK_FLAGS=( --network host )
+      ;;
+    ports|*)
+      NETWORK_FLAGS=( -p "${REDIS_HOST_BIND}:${REDIS_PORT}:6379" )
+      ;;
+  esac
+else
+  # Non-Linux (e.g., macOS, Windows): host network not supported; use ports
+  NETWORK_FLAGS=( -p "${REDIS_HOST_BIND}:${REDIS_PORT}:6379" )
+  REDIS_NETWORK=ports
 fi
 
 # Only set container-level sysctls when NOT using host networking. Docker forbids
@@ -119,6 +132,11 @@ until docker exec "${REDIS_NAME}" redis-cli -u redis://127.0.0.1:6379 ping >/dev
   sleep 0.5
 done
 
-echo "[redis] Ready. Connection: redis://127.0.0.1:6379 (mode=${REDIS_MODE})"
+if [[ "${REDIS_NETWORK}" == "host" ]]; then
+  CONNECTION_URI="redis://0.0.0.0:6379"
+else
+  CONNECTION_URI="redis://${REDIS_HOST_BIND}:${REDIS_PORT}"
+fi
+echo "[redis] Ready. Connection: ${CONNECTION_URI} (mode=${REDIS_MODE}, network=${REDIS_NETWORK})"
 echo "[redis] Example CLI: docker exec -it ${REDIS_NAME} redis-cli"
 
