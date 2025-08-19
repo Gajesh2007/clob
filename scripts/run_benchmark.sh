@@ -48,8 +48,14 @@ EVENT_SOURCE=${EVENT_SOURCE:-redis}
 GATEWAY_ADDR=${GATEWAY_ADDR:-127.0.0.1:9100}
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is required but not installed. Please install Docker." >&2
-  exit 1
+  echo "[benchmark] Installing Docker..."
+  sudo apt-get update -y
+  sudo apt-get install -y ca-certificates curl gnupg lsb-release
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+  sudo apt-get update -y
+  sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+  sudo systemctl enable --now docker
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
