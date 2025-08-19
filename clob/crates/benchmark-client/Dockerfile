@@ -2,10 +2,10 @@
 # Compiles the benchmark-client binary.
 FROM rust:slim-bookworm AS builder
 
-WORKDIR /usr/src/clob
+WORKDIR /app/clob
 
-# Copy the entire workspace to ensure all local dependencies are available.
-COPY . .
+# Copy the workspace directory (contains Cargo.toml)
+COPY clob /app/clob
 
 # Build only the benchmark-client binary in release mode.
 RUN cargo build --release --bin benchmark-client
@@ -18,7 +18,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # Copy the compiled binary from the builder stage.
-COPY --from=builder /usr/src/clob/target/release/benchmark-client /usr/local/bin/
+COPY --from=builder /app/clob/target/release/benchmark-client /usr/local/bin/
 
 # Set the entrypoint.
 CMD ["benchmark-client"]
