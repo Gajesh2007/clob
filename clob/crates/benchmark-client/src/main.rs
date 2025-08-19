@@ -146,14 +146,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let latency_hist_clone = latency_histogram.clone();
     match args.event_source.as_str() {
         "redis" => {
-            let events_channel = format!("market-events:{}", market_id);
-            // Robust subscription with simple retry loop
+            let pattern = "market-events:*".to_string();
+            // Robust subscription with simple retry loop (pattern subscribe to avoid channel drift)
             let mut pubsub_conn = loop {
                 match redis_client.get_async_connection().await {
                     Ok(c) => {
                         let mut ps = c.into_pubsub();
-                        if let Err(e) = ps.subscribe(events_channel.clone()).await {
-                            tracing::error!(error = %e, "Failed to subscribe to events; retrying");
+                        if let Err(e) = ps.psubscribe(pattern.as_str()).await {
+                            tracing::error!(error = %e, "Failed to psubscribe to events; retrying");
                             tokio::time::sleep(Duration::from_millis(500)).await;
                             continue;
                         }
@@ -167,18 +167,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
             tokio::spawn(async move {
                 let mut message_stream = pubsub_conn.on_message();
-                info!("Trade counter and latency recorder started on Redis.");
+                info!("Trade counter and latency recorder started on Redis (psubscribe market-events:*)");
                 while let Ok(Some(msg)) = time::timeout(test_duration + Duration::from_secs(5), message_stream.next()).await {
-                    let payload: Vec<u8> = msg.get_payload().unwrap();
+                    // Filter for the configured market id from the channel name
+                    let channel_name: String = msg.get_channel_name().to_string();
+                    let market_ok = channel_name.split(':').nth(1).and_then(|s| s.parse::<u32>().ok()).map(|id| id == market_id).unwrap_or(false);
+                    if !market_ok { continue; }
+                    let payload: Vec<u8> = match msg.get_payload() { Ok(p) => p, Err(_) => continue };
                     if let Ok(MarketEvent::OrderTraded(trade)) = bincode::deserialize(&payload) {
                         trade_count_clone.fetch_add(1, Ordering::SeqCst);
                         if let Some((_, start_time)) = pending_orders_clone.remove(&trade.maker_order_id) {
                             let latency = start_time.elapsed().as_micros() as u64;
-                            latency_hist_clone.lock().await.record(latency).unwrap();
+                            let _ = latency_hist_clone.lock().await.record(latency);
                         }
                         if let Some((_, start_time)) = pending_orders_clone.remove(&trade.taker_order_id) {
                             let latency = start_time.elapsed().as_micros() as u64;
-                            latency_hist_clone.lock().await.record(latency).unwrap();
+                            let _ = latency_hist_clone.lock().await.record(latency);
                         }
                     }
                 }
