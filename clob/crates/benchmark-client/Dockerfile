@@ -22,6 +22,11 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
+# Install runtime dependencies for OpenSSL and TLS
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libssl3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy the compiled binary from the builder stage.
 COPY --from=builder /app/clob/target/release/benchmark-client /usr/local/bin/
 
