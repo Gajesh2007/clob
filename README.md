@@ -9,3 +9,4 @@ The full architectural vision, detailing the hybrid real-time and asynchronous s
 The practical implementation of this system is contained within the `clob/` directory, which is a self-contained Rust workspace. It is structured to mirror the architecture described in the product document, with separate crates for the matching engine, execution plane, settlement plane, and verifier.
 
 For detailed technical information, build instructions, and steps to run the complete system, please refer to the [**`clob/README.md`**](./clob/README.md).
+-
